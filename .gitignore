@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.dev.vars
+.wrangler/
+.gradle/
+build/
+local.properties
+*.jks
+*.keystore
+.DS_Store
