@@ -1,0 +1,13 @@
+{
+  "appId": "com.nyxai.app",
+  "appName": "NYX AI",
+  "webDir": "www",
+  "backgroundColor": "#000000",
+  "android": {
+    "backgroundColor": "#000000",
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

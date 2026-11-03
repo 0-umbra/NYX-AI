@@ -1,0 +1,91 @@
+/* NYX AI — design tokens. Every colour, radius and duration used elsewhere comes from here. */
+:root {
+  /* Surfaces (pure black base for OLED screens) */
+  --bg: #000000;
+  --bg-raised: #08080f;
+  --surface: #0e0e18;
+  --surface-2: #151524;
+  --surface-3: #1e1e32;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.18);
+
+  /* Text */
+  --text: #f2f2fa;
+  --text-2: #b0b1c9;
+  --text-3: #8486a3;
+
+  /* Brand */
+  --violet: #8b5cf6;
+  --violet-deep: #6d28d9;
+  --blue: #3b82f6;
+  --blue-deep: #2563eb;
+
+  /* Active accent (swapped by [data-accent]) */
+  --accent: var(--violet);
+  --accent-deep: var(--violet-deep);
+  --accent-2: var(--blue);
+  --accent-text: #a78bfa;
+  --accent-soft: rgba(139, 92, 246, 0.16);
+  --accent-line: rgba(139, 92, 246, 0.5);
+  --accent-glow: 0 0 28px rgba(139, 92, 246, 0.32);
+  --gradient: linear-gradient(135deg, var(--violet-deep), var(--blue-deep));
+  --glow-a: rgba(109, 40, 217, 0.26);
+  --glow-b: rgba(37, 99, 235, 0.14);
+  --bubble-user: rgba(109, 40, 217, 0.34);
+
+  /* Status */
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+  --ok: #34d399;
+  --warn: #fbbf24;
+
+  /* Shape */
+  --radius-s: 10px;
+  --radius-m: 14px;
+  --radius-l: 20px;
+  --radius-xl: 26px;
+  --radius-pill: 999px;
+
+  /* Type */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --fs-base: 16px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur: 180ms;
+
+  /* Layout (updated at runtime for the on-screen keyboard) */
+  --app-h: 100dvh;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+:root[data-theme="night"] {
+  --bg: #05050d;
+  --bg-raised: #0a0a15;
+  --surface: #11111f;
+  --surface-2: #181829;
+  --surface-3: #212139;
+}
+
+:root[data-accent="blue"] {
+  --accent: var(--blue);
+  --accent-deep: var(--blue-deep);
+  --accent-2: var(--violet);
+  --accent-text: #93c5fd;
+  --accent-soft: rgba(59, 130, 246, 0.16);
+  --accent-line: rgba(59, 130, 246, 0.5);
+  --accent-glow: 0 0 28px rgba(59, 130, 246, 0.32);
+  --gradient: linear-gradient(135deg, var(--blue-deep), var(--violet-deep));
+  --glow-a: rgba(37, 99, 235, 0.24);
+  --glow-b: rgba(109, 40, 217, 0.14);
+  --bubble-user: rgba(37, 99, 235, 0.34);
+}
+
+:root[data-text="sm"] { --fs-base: 15px; }
+:root[data-text="lg"] { --fs-base: 18px; }
+
+:root[data-motion="reduce"] { --dur: 0.01ms; }

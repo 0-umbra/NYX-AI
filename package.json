@@ -1,0 +1,27 @@
+{
+  "name": "nyx-ai",
+  "version": "0.2.1",
+  "description": "NYX AI — Intelligence beyond limits. Android-first AI assistant frontend (Stage 2).",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "node scripts/dev-server.js",
+    "start": "node scripts/dev-server.js",
+    "build": "node scripts/build.js",
+    "test": "node scripts/run-tests.js",
+    "test:e2e": "node --test tests/e2e/ui.test.mjs",
+    "cap:add:android": "npm run build && cap add android",
+    "cap:sync": "npm run build && cap sync android",
+    "cap:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.0",
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/core": "^7.4.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.0"
+  }
+}
