@@ -310,7 +310,12 @@ export default {
       }
 
       return json({ reply }, 200, origin);
-    } catch {
+    } catch (error) {
+      console.error("Workers AI request failed:", {
+        name: error?.name || "UnknownError",
+        message: String(error?.message || "No error message").slice(0, 500)
+      });
+
       return json({
         error: "The AI service is temporarily unavailable. Please try again later."
       }, 503, origin);
