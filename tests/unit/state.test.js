@@ -152,7 +152,7 @@ test('util + config', () => {
   assert.equal(plural(1, 'file'), '1 file');
   assert.equal(plural(2, 'file'), '2 files');
   assert.notEqual(uid(), uid());
-  assert.equal(isBackendConfigured(), false);
-  assert.equal(BACKEND.baseUrl, null);
+  assert.equal(isBackendConfigured(), true);
+  assert.equal(BACKEND.baseUrl, 'https://nyx-ai-backend.mehrablone100-8ee.workers.dev');
   assert.deepEqual(SUPABASE, { url: null, anonKey: null });
 });

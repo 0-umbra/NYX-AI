@@ -14,7 +14,9 @@ export const APP = Object.freeze({
 });
 
 /** Stage 3: set to the Cloudflare Worker URL, e.g. 'https://nyx-api.example.workers.dev'. */
-export const BACKEND = { baseUrl: null };
+export const BACKEND = {
+  baseUrl: 'https://nyx-ai-backend.mehrablone100-8ee.workers.dev'
+};
 
 /** Stage 3+: Supabase project URL and *anon* key (public). Never the service-role key. */
 export const SUPABASE = { url: null, anonKey: null };
