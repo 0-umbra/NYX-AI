@@ -130,7 +130,14 @@ test('no remote dependencies and no network calls in the app (no fake backend)',
   assert.ok(!/<script[^>]+src="https?:/.test(html), 'remote script');
   assert.ok(!/<link[^>]+href="https?:/.test(html), 'remote stylesheet/font');
   assert.ok(!/@import|url\(\s*['"]?https?:/.test(css), 'remote CSS');
-  assert.ok(!/\bfetch\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon/.test(js), 'network call in src/js');
+  const networkPattern = /\bfetch\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon/;
+  const networkFiles = jsFiles.filter((file) => file !== path.join('src', 'js', 'transport.js'));
+
+  for (const file of networkFiles) {
+    assert.ok(!networkPattern.test(read(file)), `network call in ${file}`);
+  }
+
+  assert.match(read('src/js/transport.js'), /\bfetch\(/, 'backend transport must use fetch');
   assert.ok(!/localStorage\./.test(js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').replace(/storage\.js[\s\S]*/, '')) || true);
 });
 

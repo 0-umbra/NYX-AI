@@ -5,6 +5,8 @@ import { createRouter } from './router.js';
 import { createPrefs, applyPrefs, initSettings } from './settings.js';
 import { initModels } from './models.js';
 import { initChat } from './chat.js';
+import { createTransport } from './transport.js';
+import { initAuth } from './auth.js';
 import { initSidebar } from './sidebar.js';
 import { $, toast, closeTopDialog } from './ui.js';
 
@@ -52,8 +54,10 @@ function boot() {
   const router = createRouter({ onChange: (name) => { if (name === 'chat') chat?.scrollToBottom(); else sidebar?.close({ restoreFocus: false }); } });
   const models = initModels({ storage, onCompare: () => router.go('models') });
   chat = initChat({ store, getModelId: () => models.id });
+  chat.setTransport(createTransport);
   sidebar = initSidebar({ store, chat, router, storage });
   initSettings({ prefs, store, storage });
+  initAuth({ prefs });
   router.start();
   bindBackButton({ router, sidebar });
 

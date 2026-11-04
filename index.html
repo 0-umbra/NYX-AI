@@ -187,15 +187,29 @@
           <h1 id="account-title" class="topbar-title" tabindex="-1">Account</h1>
         </header>
         <div class="scroll"><div class="page">
-          <div class="hero"><span class="avatar avatar-lg" id="acct-avatar" aria-hidden="true">G</span><strong id="acct-name">Guest</strong><span class="badge badge-warn">Not signed in</span></div>
+          <div class="hero">
+            <span class="avatar avatar-lg" id="acct-avatar" aria-hidden="true">G</span>
+            <strong id="acct-name">Guest</strong>
+            <span class="badge badge-warn" id="acct-status">Guest mode</span>
+            <span class="row-sub" id="acct-email"></span>
+          </div>
           <div class="group"><div class="field-row stack">
             <label class="field-label" for="display-name">Display name</label>
             <input id="display-name" class="text-input" type="text" maxlength="32" placeholder="Guest" autocomplete="nickname" enterkeyhint="done">
-            <span class="row-sub">Saved on this device only.</span></div></div>
+            <span class="row-sub">Saved on this device. Signed-in accounts can sync this name.</span>
+          </div></div>
+          <div class="group stack-gap" style="padding:16px">
+            <label class="field-label" for="account-email">Email address</label>
+            <input id="account-email" class="text-input" type="email" maxlength="254" placeholder="you@example.com" autocomplete="email">
+            <label class="field-label" for="account-password">Password</label>
+            <input id="account-password" class="text-input" type="password" minlength="6" maxlength="128" placeholder="At least 6 characters" autocomplete="current-password">
+          </div>
           <div class="stack-gap">
-            <button type="button" class="btn btn-primary btn-block" disabled>Sign in</button>
-            <button type="button" class="btn btn-block" disabled>Create account</button>
-            <p class="section-note">Accounts arrive when the backend is added. Nothing here connects to a server yet.</p>
+            <button type="button" id="account-signin" class="btn btn-primary btn-block">Sign in</button>
+            <button type="button" id="account-create" class="btn btn-block">Create account</button>
+            <button type="button" id="account-reset" class="btn btn-block">Reset password</button>
+            <button type="button" id="account-logout" class="btn btn-block" hidden>Sign out</button>
+            <p class="section-note">Guest mode keeps conversations on this device. Sign in to enable authenticated cloud chat when the NYX backend is deployed.</p>
           </div>
           <div>
             <h2 class="section-title">Data on this device</h2>

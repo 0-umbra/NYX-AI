@@ -5,7 +5,9 @@
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "node scripts/dev-server.js",
     "start": "node scripts/dev-server.js",
@@ -19,9 +21,11 @@
   "dependencies": {
     "@capacitor/android": "^7.4.0",
     "@capacitor/app": "^7.0.0",
-    "@capacitor/core": "^7.4.0"
+    "@capacitor/core": "^7.4.0",
+    "firebase": "^13.2.0"
   },
   "devDependencies": {
-    "@capacitor/cli": "^7.4.0"
+    "@capacitor/cli": "^7.4.0",
+    "esbuild": "^0.28.2"
   }
 }
