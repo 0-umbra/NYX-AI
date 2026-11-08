@@ -23,11 +23,15 @@ For Android, build and run `npx cap sync android` after setting up the Android p
 
 ## Data and behaviour
 
-Conversations, titles and pins are stored locally, not synced or partitioned by account. Signing out does not erase them; anyone using this device and signing in can see them. Clearing app data deletes local history. Attachments currently save metadata only and are not sent to the model; voice and memory are previews. Worker replies are complete JSON responses: the frontend progressively reveals the returned text, not genuine streaming. Stopping a reveal retains only the text shown so far. PRO and MAX cannot be selected or sent to the Worker.
+Conversations, titles and pins are stored locally, not synced or partitioned by account. Signing out does not erase them; anyone using this device and signing in can see them. Clearing app data deletes local history. Attachments currently save metadata only and are not sent to the model, so a message without text is kept locally and explained instead of being sent; voice and memory are previews. Worker replies are complete JSON responses: the frontend progressively reveals the returned text, not genuine streaming. Stopping a reveal retains only the text shown so far. PRO and MAX cannot be selected or sent to the Worker.
+
+### Conversation context
+
+The Worker is stateless, so every request carries the conversation so far. `src/js/history.js` builds that list from the open conversation only: earlier `user`/`assistant` turns, then the newest message exactly once. Local notices, empty assistant placeholders and attachment-only messages are dropped, the list never starts with an assistant turn, and it is bounded to 16 messages / 4000 characters each / 12000 characters in total (`LIMITS` in `src/js/config.js`). The Worker re-validates the same rules and forwards the history to the FREE model. The open conversation is remembered (`activeConversation` in local storage) so a reload or an Android WebView restart continues the same chat instead of silently starting a new one; "New chat" clears it. Regression tests live in `tests/unit/context.test.js`, `tests/unit/features.test.js` and `backend/test/index.test.js`.
 
 ## Branding
 
-The existing in-app mark is `src/assets/logo/nyx-mark.svg`; HTML and the chat avatar reference this single asset. Replace it at that path when the new logo is ready. PWA icons under `src/assets/icons/` and Android icon sources under `resources/` are separate assets and are intentionally unchanged.
+The in-app mark is the supplied logo, `src/assets/logo/nyx-mark.png` (square PNG, 512 x 512, displayed at its original proportions). The login screen, sidebar brand, welcome screen, About screen, favicon and chat avatar all reference this single asset; `index.html` and `src/js/chat.js` are the only places that name it. The PWA icons (`src/assets/icons/`) and the Android icon sources (`resources/`) are derived from it by rescaling and centring only — never cropping, recolouring or redrawing — with `npm i --no-save sharp && node scripts/generate-icons.mjs`. The supplied file is an opaque square, so the adaptive foreground layer is the logo centred on a transparent canvas rather than a cut-out mark.
 
 ## Git workflow
 

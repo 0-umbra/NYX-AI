@@ -2,6 +2,7 @@
 import { renderMarkdown } from './markdown.js';
 import { escapeHtml, formatBytes, plural } from './util.js';
 import { LIMITS } from './config.js';
+import { buildConversationHistory } from './history.js';
 import { revealText } from './reveal.js';
 import { isModelAvailable } from './models.js';
 import { $, icon, toast, copyText } from './ui.js';
@@ -16,12 +17,14 @@ export function messageHtml(msg) {
   const body = msg.role === 'user'
     ? `<div class="msg-text">${escapeHtml(msg.content)}</div>${files}`
     : `<div class="msg-body md">${msg.content ? renderMarkdown(msg.content) : '<span class="typing" aria-label="NYX AI is responding"><i></i><i></i><i></i></span>'}</div>`;
-  const avatar = msg.role === 'assistant' ? '<img class="msg-avatar" src="src/assets/logo/nyx-mark.svg" alt="" width="30" height="30">' : '';
+  const avatar = msg.role === 'assistant' ? '<img class="msg-avatar" src="src/assets/logo/nyx-mark.png" alt="" width="30" height="30">' : '';
   return `<li class="msg msg-${msg.role}" data-id="${escapeHtml(msg.id)}">${avatar}<div class="msg-main"><div class="msg-bubble">${body}</div>`
     + `<div class="msg-actions"><button type="button" class="act" data-copy-msg aria-label="Copy message">${icon('copy')}</button></div></div></li>`;
 }
 
-export function initChat({ store, getModelId }) {
+const ACTIVE_KEY = 'activeConversation';
+
+export function initChat({ store, getModelId, storage = null }) {
   const els = {
     scroller: $('messages'), list: $('message-list'), welcome: $('welcome'), form: $('composer'), input: $('composer-input'),
     send: $('send-btn'), stop: $('stop-btn'), attach: $('attach-btn'), image: $('image-btn'), voice: $('voice-btn'), file: $('file-input'), imageFile: $('image-input'),
@@ -32,6 +35,17 @@ export function initChat({ store, getModelId }) {
   let transport = null;
   let abort = null;
   let attachments = [];
+
+  // Restore the conversation that was open before a reload or an Android WebView restart.
+  // Without this the next message would silently start a brand-new chat with no context.
+  const remember = (id) => {
+    if (!storage) return;
+    if (id) storage.set(ACTIVE_KEY, id);
+    else storage.remove(ACTIVE_KEY);
+  };
+  const restored = storage?.get(ACTIVE_KEY, null);
+  if (typeof restored === 'string' && store.get(restored)) activeId = restored;
+  else if (restored) remember(null);
 
   const generating = () => abort !== null;
   const pinned = () => els.scroller.scrollHeight - els.scroller.scrollTop - els.scroller.clientHeight < 90;
@@ -82,6 +96,7 @@ export function initChat({ store, getModelId }) {
 
   function setActive(id) {
     activeId = id;
+    remember(id);
     subs.forEach((fn) => fn(id));
   }
 
@@ -135,9 +150,8 @@ export function initChat({ store, getModelId }) {
       if (wasPinned) scrollToBottom(); else updateJump();
     };
     try {
-      const history = store.get(conv.id).messages
-        .filter((m) => m.role !== 'system' && m.id !== reply.id)
-        .map(({ role, content }) => ({ role, content }));
+      // Only this conversation, cleaned and bounded: earlier turns plus the newest user message.
+      const history = buildConversationHistory(store.get(conv.id)?.messages ?? [], { excludeId: reply.id });
       for await (const chunk of transport({ conversationId: conv.id, messages: history, model: getModelId(), signal: controller.signal })) {
         await revealText(String(chunk), { signal: controller.signal, onText: (part) => { text += part; paint(); } });
       }
@@ -174,6 +188,13 @@ export function initChat({ store, getModelId }) {
     els.input.value = '';
     renderAttachments();
     autosize();
+
+    // Attachments are saved locally only, so a message without text has nothing to ask the model.
+    // Sending it would put an empty turn in the conversation that the backend has to reject.
+    if (!text) {
+      append(store.addMessage(conv.id, { role: 'system', kind: 'attachment-only', content: '**Attachments are stored on this device only.** Add a message describing what you need from them.' }));
+      return;
+    }
 
     if (!transport) {
       append(store.addMessage(conv.id, { role: 'system', kind: 'backend-offline', content: 'Chat is temporarily unavailable. Please try again later.' }));

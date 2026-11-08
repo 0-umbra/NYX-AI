@@ -45,7 +45,7 @@ test('capacitor.config.json: valid app id, name and webDir produced by the build
 test('build produces a complete www/ directory', () => {
   const r = spawnSync(process.execPath, ['scripts/build.js'], { cwd: ROOT, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  for (const f of ['index.html', 'manifest.webmanifest', 'src/js/app.js', 'src/css/components.css', 'src/assets/logo/nyx-mark.svg', 'src/assets/icons/icon-512.png']) {
+  for (const f of ['index.html', 'manifest.webmanifest', 'src/js/app.js', 'src/css/components.css', 'src/assets/logo/nyx-mark.png', 'src/assets/icons/icon-512.png']) {
     assert.ok(existsSync(path.join(ROOT, 'www', f)), `www/${f}`);
   }
   assert.ok(!existsSync(path.join(ROOT, 'www', 'package.json')));

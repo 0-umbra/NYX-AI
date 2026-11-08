@@ -1,13 +1,13 @@
+import { buildConversationMessages, SYSTEM_PROMPT } from "./conversation.js";
+
 const PROJECT_ID = "nyx-ai-1617b";
 const ISSUER = `https://securetoken.google.com/${PROJECT_ID}`;
 const JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 const ALLOWED_ORIGIN = "https://localhost";
 
 const MAX_BODY_BYTES = 64 * 1024;
-const MAX_MESSAGES = 12;
-const MAX_MESSAGE_LENGTH = 4000;
-const MAX_TOTAL_CHARS = 24000;
 const CLOCK_TOLERANCE = 60;
+const FREE_MODEL = "@cf/zai-org/glm-4.7-flash";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
@@ -259,9 +259,8 @@ export default {
       return json({ error: "Invalid JSON request." }, 400, origin);
     }
 
-    if (!body || !Array.isArray(body.messages) ||
-        body.messages.length === 0 || body.messages.length > MAX_MESSAGES) {
-      return json({ error: "Invalid conversation length." }, 400, origin);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return json({ error: "Invalid JSON request." }, 400, origin);
     }
 
     if (body.model !== "free") {
@@ -273,33 +272,18 @@ export default {
       return json({ error: "Invalid conversation identifier." }, 400, origin);
     }
 
-    let totalChars = 0;
-
-    for (const message of body.messages) {
-      if (!message || !["user", "assistant"].includes(message.role) ||
-          typeof message.content !== "string" || !message.content.trim() ||
-          message.content.length > MAX_MESSAGE_LENGTH) {
-        return json({ error: "Invalid message format." }, 400, origin);
-      }
-      totalChars += message.content.length;
-    }
-
-    if (totalChars > MAX_TOTAL_CHARS) {
-      return json({ error: "Conversation is too large." }, 413, origin);
-    }
-
-    if (body.messages[body.messages.length - 1].role !== "user") {
-      return json({ error: "The latest message must be from the user." }, 400, origin);
+    const conversation = buildConversationMessages(body?.messages);
+    if (conversation.error) {
+      return json({ error: conversation.error }, conversation.status || 400, origin);
     }
 
     try {
-      const result = await env.AI.run("@cf/zai-org/glm-4.7-flash", {
+      // The FREE model keeps its existing id and request shape; the conversation history is
+      // forwarded as messages so the model can follow up on earlier turns.
+      const result = await env.AI.run(FREE_MODEL, {
         messages: [
-          {
-            role: "system",
-            content: "You are NYX AI, a helpful, accurate and respectful AI assistant."
-          },
-          ...body.messages
+          { role: "system", content: SYSTEM_PROMPT },
+          ...conversation.messages
         ],
         max_tokens: 700,
         chat_template_kwargs: { enable_thinking: false }
