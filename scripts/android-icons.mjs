@@ -27,7 +27,8 @@
  * Exit code 0 = every check passed, 1 = one or more checks failed.
  */
 import { deflateSync, inflateRawSync, inflateSync } from 'node:zlib';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir, lstat, unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -383,6 +384,13 @@ export function isUniform(rgba) {
   return true;
 }
 
+// Only these exact Capacitor 7.6.10 scaffold files may be removed. Never delete a
+// customized file merely because it has a launcher resource name.
+const OBSOLETE_CAPACITOR_VECTORS = new Map([
+  ['drawable/ic_launcher_background.xml', '718ba51adf166bb55c3e9936bb8199a0148457f7f0191aaa2f37a94f3159d6ec'],
+  ['drawable-v24/ic_launcher_foreground.xml', 'a8514094f754b099d3e55ce1d6e0b2de79db418b2eeacb0fc2a6bb0bfadef221'],
+]);
+
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
@@ -399,6 +407,18 @@ export async function generateIcons(outDir, { logoPath = DEFAULT_LOGO } = {}) {
   if (!existsSync(logoPath)) throw new Error(`logo not found: ${logoPath}`);
   const logo = decodePng(await readFile(logoPath));
   if (logo.width !== logo.height) throw new Error('the NYX AI logo must be square');
+
+  // Removing only a recognized scaffold avoids silently overwriting user resources.
+  // Unknown competing configurations are retained and rejected by verifyIcons.
+  for (const [relative, hash] of OBSOLETE_CAPACITOR_VECTORS) {
+    const file = path.join(outDir, relative);
+    if (!existsSync(file)) continue;
+    const parent = await lstat(path.dirname(file));
+    const stat = await lstat(file);
+    if (!parent.isDirectory() || !stat.isFile()) continue;
+    const actual = createHash('sha256').update(await readFile(file)).digest('hex');
+    if (actual === hash) await unlink(file);
+  }
 
   const written = [];
   for (const density of DENSITIES) {
@@ -455,6 +475,21 @@ export async function verifyIcons(outDir, { logoPath = DEFAULT_LOGO, tolerance =
   }
   const logo = decodePng(await readFile(logoPath));
   const logoAverage = averageColor(logo.rgba, logo.width, logo.height);
+
+  // Android considers every configuration with the same resource type and name,
+  // not just the five generated buckets. Reject competing source resources rather
+  // than guessing which a particular device will select.
+  if (existsSync(outDir)) {
+    for (const dir of await readdir(outDir, { withFileTypes: true })) {
+      if (!dir.isDirectory() || !/^(drawable|mipmap)(?:-|$)/.test(dir.name)) continue;
+      for (const entry of await readdir(path.join(outDir, dir.name))) {
+        const isLayer = /^drawable(?:-|$)/.test(dir.name) && /^ic_launcher_(?:background|foreground)(?:\.|$)/.test(entry);
+        const isIcon = /^mipmap(?:-|$)/.test(dir.name) && /^ic_launcher(?:_round)?(?:\.|$)/.test(entry);
+        const relative = `${dir.name}/${entry}`;
+        if ((isLayer || isIcon) && !expected.has(relative)) problems.push(`${relative}: unverified competing launcher configuration`);
+      }
+    }
+  }
 
   for (const relative of REQUIRED_FILES) {
     const abs = path.join(outDir, relative);
@@ -817,12 +852,21 @@ function resolveDrawable(buf, id) {
   const keys = androidStrings(buf, androidChunk(buf, pkg.start + buf.readUInt32LE(pkg.start + 276), pkg.end));
   const files = new Set();
   const configurations = [];
-  let key;
+  let key, specCount;
   for (const c of androidChildren(buf, pkg)) {
+    if (c.type === 0x0202 && c.header >= 16 && buf[c.start + 8] + typeOffset === typeId) {
+      if (specCount !== undefined) throw new Error('duplicate resource type spec');
+      specCount = buf.readUInt32LE(c.start + 12);
+      if (specCount > Math.floor((c.size - c.header) / 4)) throw new Error('truncated resource type spec');
+      continue;
+    }
     if (c.type !== 0x0201) continue;
     if (c.header < 24) throw new Error('invalid resource type header');
     const localType = buf[c.start + 8];
     if (localType + typeOffset !== typeId) continue;
+    // Android's resource loader requires a type-spec before its type chunks.
+    if (specCount === undefined) throw new Error('missing or invalid resource type spec');
+    if (entryId >= specCount) throw new Error('unresolved drawable resource');
     const configSize = buf.readUInt32LE(c.start + 20);
     if (configSize < 28 || configSize > c.header - 20) throw new Error('invalid resource configuration size');
     const config = buf.subarray(c.start + 20, c.start + 20 + configSize);

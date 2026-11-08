@@ -17,13 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && '59f905f5956cc57a512fa22f0bbc4f343e139b05' || github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Assert diagnostic commit
         if: ${{ github.event_name == 'pull_request' }}
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           actual="$(git rev-parse HEAD)"
           echo "Diagnostic checkout: $actual"
-          test "$actual" = "59f905f5956cc57a512fa22f0bbc4f343e139b05"
+          test "$actual" = "$EXPECTED_HEAD"
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-java@v4
@@ -40,15 +42,15 @@ jobs:
       # the resources from resources/.
       - run: node scripts/android-icons.mjs
       - run: cd android && ./gradlew assembleDebug
-      # Temporary investigation: inspect the old pinned build's compiled resource configurations.
+      # Temporary investigation: inspect compiled resource configurations.
       - name: Report packaged launcher configurations
         run: |
           aapt2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)"
           "$aapt2" dump resources android/app/build/outputs/apk/debug/app-debug.apk > "$RUNNER_TEMP/nyx-resources.txt"
-          grep -E -B 2 -A 15 'ic_launcher' "$RUNNER_TEMP/nyx-resources.txt" > "$RUNNER_TEMP/nyx-launcher-configs.txt"
+          grep -E -B 2 -A 15 'ic_launcher' "$RUNNER_TEMP/nyx-resources.txt" > "$RUNNER_TEMP/nyx-launcher-configs.txt" || true
           cat "$RUNNER_TEMP/nyx-launcher-configs.txt"
           output="$(cat "$RUNNER_TEMP/nyx-launcher-configs.txt")"
-          test -n "$output"
+          if [ -z "$output" ]; then output='No launcher configurations found in dump'; fi
           output="${output//'%'/'%25'}"; output="${output//$'\r'/'%0D'}"; output="${output//$'\n'/'%0A'}"
           printf '::notice title=Packaged launcher configurations::%s\n' "$output"
       - name: Report APK SHA-256 and size

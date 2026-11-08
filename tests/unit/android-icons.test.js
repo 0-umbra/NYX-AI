@@ -16,7 +16,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -187,7 +187,7 @@ function binaryManifest({ icon = ICON_ID, roundIcon = ROUND_ID, activityIcon } =
     end('intent-filter'), end('activity'), end('application'), end('manifest'),
   ]));
 }
-function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foreground', badPath = false, extraForeground = false, nightOnly = false, omitMipmaps = false, wrongDensity = false } = {}) {
+function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foreground', badPath = false, extraForeground = false, extraBackground = false, nightOnly = false, omitMipmaps = false, wrongDensity = false, omitSpec = false } = {}) {
   const densities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
   const values = densities.flatMap((d) => [
     `res/drawable-${d}${qualifier}/ic_launcher_background.png`,
@@ -196,6 +196,8 @@ function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foregr
   const extraIndex = values.length;
   values.push('long-resource-path-' + 'x'.repeat(200)); // exercise two-byte UTF-8 lengths
   if (extraForeground) values.push(`res/drawable-v24/ic_launcher_foreground.${extraForeground === 'png' ? 'png' : 'xml'}`);
+  const backgroundIndex = values.length;
+  if (extraBackground) values.push('res/drawable/ic_launcher_background.xml');
   const typeStrings = strings(['drawable', 'mipmap']);
   const keyStrings = strings(['ic_launcher_background', foregroundName, 'ic_launcher', 'ic_launcher_round']);
   const configs = densities.map((d, i) => {
@@ -222,6 +224,15 @@ function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foregr
     entry.writeUInt16LE(8, 8); entry[11] = 3; entry.writeUInt32LE(extraIndex + 1, 12);
     configs.push(chunk(0x201, header, Buffer.concat([offsets, entry])));
   }
+  if (extraBackground) {
+    const header = Buffer.alloc(84);
+    header[8] = 1; header.writeUInt32LE(2, 12); header.writeUInt32LE(92, 16);
+    header.writeUInt32LE(64, 20);
+    const offsets = Buffer.alloc(8); offsets.writeUInt32LE(0, 0); offsets.writeUInt32LE(0xffffffff, 4);
+    const entry = Buffer.alloc(16); entry.writeUInt16LE(8, 0);
+    entry.writeUInt16LE(8, 8); entry[11] = 3; entry.writeUInt32LE(backgroundIndex, 12);
+    configs.push(chunk(0x201, header, Buffer.concat([offsets, entry])));
+  }
   const mipmaps = [...densities.map((d, i) => ({ density: [160, 240, 320, 480, 640][i], sdk: 4,
     paths: [`res/mipmap-${d}${qualifier}/ic_launcher.png`, `res/mipmap-${d}${qualifier}/ic_launcher_round.png`] })),
     { density: 0xfffe, sdk: 26, paths: ['res/mipmap-anydpi-v26/ic_launcher.xml', 'res/mipmap-anydpi-v26/ic_launcher_round.xml'] }];
@@ -241,7 +252,11 @@ function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foregr
   pkg.writeUInt32LE(0x7f, 8);
   pkg.writeUInt32LE(288, 268);
   pkg.writeUInt32LE(288 + typeStrings.length, 276);
-  const packageChunk = chunk(0x200, pkg, Buffer.concat([typeStrings, keyStrings, ...configs]));
+  const spec = (id) => {
+    const header = Buffer.alloc(16); header[8] = id; header.writeUInt32LE(2, 12);
+    return chunk(0x202, header, Buffer.alloc(8));
+  };
+  const packageChunk = chunk(0x200, pkg, Buffer.concat([typeStrings, keyStrings, ...(omitSpec ? [] : [spec(1), spec(2)]), ...configs]));
   const table = Buffer.alloc(12); table.writeUInt32LE(1, 8);
   return chunk(2, table, Buffer.concat([strings(values), packageChunk]));
 }
@@ -253,6 +268,35 @@ test('android icons: the official logo is the only source and it is square', asy
   assert.equal(logo.width, 512);
   assert.equal(logo.height, 512);
   assert.ok(logo.rgba.length === 512 * 512 * 4);
+});
+
+test('android icons: removes only the recognized Capacitor vectors and preserves custom conflicts', async () => {
+  const out = await tempDir();
+  try {
+    for (const [dir, name, fixture] of [
+      ['drawable', 'ic_launcher_background.xml', 'background.xml'],
+      ['drawable-v24', 'ic_launcher_foreground.xml', 'foreground.xml'],
+    ]) {
+      await mkdir(path.join(out, dir), { recursive: true });
+      await writeFile(path.join(out, dir, name), await readFile(path.join(ROOT, 'tests/fixtures/android-capacitor-7', fixture)));
+    }
+    await generateIcons(out);
+    assert.equal(existsSync(path.join(out, 'drawable/ic_launcher_background.xml')), false);
+    assert.equal(existsSync(path.join(out, 'drawable-v24/ic_launcher_foreground.xml')), false);
+    assert.deepEqual(await verifyIcons(out), []);
+
+    const custom = path.join(out, 'drawable-v24/ic_launcher_foreground.xml');
+    const other = path.join(out, 'drawable-night/ic_launcher_background.xml');
+    await mkdir(path.dirname(other), { recursive: true });
+    await writeFile(custom, '<vector custom="true"/>');
+    await writeFile(other, '<vector custom="night"/>');
+    await generateIcons(out);
+    assert.equal(await readFile(custom, 'utf8'), '<vector custom="true"/>');
+    assert.equal(await readFile(other, 'utf8'), '<vector custom="night"/>');
+    const problems = await verifyIcons(out);
+    assert.ok(problems.some((p) => p.includes('drawable-v24/ic_launcher_foreground.xml: unverified competing')));
+    assert.ok(problems.some((p) => p.includes('drawable-night/ic_launcher_background.xml: unverified competing')));
+  } finally { await rm(out, { recursive: true, force: true }); }
 });
 
 test('android icons: generates every required Android launcher icon variant', async () => {
@@ -507,6 +551,7 @@ test('android icons: the generated set is exactly what an APK is checked against
     await checkChange('resources.arsc', resourceTable({ wrongDensity: true }), /does not resolve to mdpi drawable/);
     await checkChange('resources.arsc', resourceTable({ omitMipmaps: true }), /unresolved drawable resource/);
     await checkChange('resources.arsc', resourceTable({ foregroundName: 'placeholder' }), /wrong drawable/);
+    await checkChange('resources.arsc', resourceTable({ extraBackground: true }), /unverified drawable configuration: res\/drawable\/ic_launcher_background.xml/);
     await checkChange('resources.arsc', resourceTable({ extraForeground: true }), /unverified drawable configuration: res\/drawable-v24\/ic_launcher_foreground.xml/);
     const pngAlternative = { name: 'res/drawable-v24/ic_launcher_foreground.png', data: await readFile(path.join(out, 'drawable-mdpi/ic_launcher_foreground.png')) };
     const withAlternative = entries.map((entry) => entry.name === 'resources.arsc' ? { ...entry, data: resourceTable({ extraForeground: 'png' }) } : entry).concat([pngAlternative]);
@@ -514,6 +559,7 @@ test('android icons: the generated set is exactly what an APK is checked against
     assert.deepEqual((await verifyApkIcons(apkPath)).problems, [], 'valid alternative drawable pixels are checked and accepted');
     await writeFile(apkPath, buildZip(withAlternative.map((entry) => entry.name === pngAlternative.name ? { ...entry, data: encodePng(108, 108, Buffer.alloc(108 * 108 * 4)) } : entry)));
     assert.ok((await verifyApkIcons(apkPath)).problems.some((p) => /alternative pixels differ/.test(p)));
+    await checkChange('resources.arsc', resourceTable({ omitSpec: true }), /missing or invalid resource type spec/);
     await checkChange('resources.arsc', Buffer.from('corrupt'), /Android resource/);
     await checkChange('res/mipmap-mdpi-v4/ic_launcher.png', encodePng(7, 7, Buffer.alloc(196)), /expected 48x48, found 7x7/);
     await checkChange('res/mipmap-mdpi-v4/ic_launcher_round.png', encodePng(48, 48, Buffer.alloc(48 * 48 * 4, 255)), /opaque corners/);
