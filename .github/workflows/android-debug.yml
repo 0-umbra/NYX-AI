@@ -29,6 +29,7 @@ jobs:
       # Confirm the icon really is inside the packaged APK, not just in the source tree.
       - run: node scripts/android-icons.mjs --check-apk android/app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: nyx-ai-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
