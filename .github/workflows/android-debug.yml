@@ -5,11 +5,25 @@ on:
   workflow_dispatch:
   push:
     branches: [develop]
+  # Temporary PR #6 diagnostic: remove this trigger and its checkout/assertion before merge.
+  pull_request:
+    types: [synchronize]
+    branches: [develop]
 jobs:
   apk:
+    # GitHub cannot filter pull_request triggers by number; skip all other PRs.
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.number == 6 && github.head_ref == 'arena/b5cf563a-nyx-ai' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && '59f905f5956cc57a512fa22f0bbc4f343e139b05' || github.sha }}
+      - name: Assert diagnostic commit
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "Diagnostic checkout: $actual"
+          test "$actual" = "59f905f5956cc57a512fa22f0bbc4f343e139b05"
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-java@v4
@@ -26,6 +40,10 @@ jobs:
       # the resources from resources/.
       - run: node scripts/android-icons.mjs
       - run: cd android && ./gradlew assembleDebug
+      - name: Report APK SHA-256 and size
+        run: |
+          sha256sum android/app/build/outputs/apk/debug/app-debug.apk
+          stat --printf='APK size: %s bytes\n' android/app/build/outputs/apk/debug/app-debug.apk
       # Confirm the icon really is inside the packaged APK, not just in the source tree.
       - run: node scripts/android-icons.mjs --check-apk android/app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
