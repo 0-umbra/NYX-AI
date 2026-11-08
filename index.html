@@ -50,7 +50,32 @@
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/></symbol>
   </svg>
 
-  <div class="app is-booting" id="app">
+  <section id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <img class="auth-logo" src="src/assets/logo/nyx-mark.svg" alt="" width="72" height="72">
+      <p class="auth-eyebrow">NYX AI</p>
+      <h1 id="auth-title">Welcome to NYX AI</h1>
+      <p class="auth-intro">Intelligence beyond limits. Sign in to continue.</p>
+      <p id="auth-loading" class="auth-loading" role="status">Restoring your session…</p>
+      <div id="auth-content" hidden>
+        <div class="auth-tabs" role="group" aria-label="Account access">
+          <button type="button" id="auth-login-tab" class="auth-tab is-active" aria-pressed="true">Log In</button>
+          <button type="button" id="auth-create-tab" class="auth-tab" aria-pressed="false">Create Account</button>
+        </div>
+        <form id="auth-form" class="auth-form" novalidate>
+          <label for="auth-email">Email address</label>
+          <input id="auth-email" class="text-input" type="email" maxlength="254" autocomplete="email" placeholder="you@example.com" required>
+          <label for="auth-password">Password</label>
+          <div class="auth-password-wrap"><input id="auth-password" class="text-input" type="password" minlength="6" maxlength="128" autocomplete="current-password" placeholder="Your password" required><button id="auth-visibility" class="auth-visibility" type="button" aria-pressed="false">Show</button></div>
+          <p id="auth-error" class="auth-error" role="alert" hidden></p>
+          <button id="auth-submit" type="submit" class="btn btn-primary btn-block">Log In</button>
+        </form>
+        <button id="auth-reset" type="button" class="auth-reset">Forgot password?</button>
+        <p class="auth-footnote">Your conversations stay on this device.</p>
+      </div>
+    </div>
+  </section>
+  <div class="app is-booting" id="app" hidden>
     <!-- Sidebar -->
     <aside id="sidebar" class="sidebar" aria-label="Sidebar">
       <div class="sidebar-head">
@@ -92,7 +117,6 @@
               <div class="welcome-logo"><img src="src/assets/logo/nyx-mark.svg" alt="" width="120" height="120"></div>
               <h2>NYX AI</h2>
               <p class="welcome-tagline">Intelligence beyond limits.</p>
-              <p class="status-pill" role="note"><span class="dot" aria-hidden="true"></span><span>AI backend not connected. Replies aren’t available yet.</span></p>
             </div>
             <div class="suggestions" role="group" aria-label="Prompt ideas">
               <button type="button" class="suggestion" data-suggest="Explain how neural networks learn, in simple terms."><span class="suggestion-title">Explain a concept</span><span class="suggestion-desc">How neural networks learn</span></button>
@@ -123,7 +147,7 @@
           </div>
           <input type="file" id="file-input" aria-label="Attach files" multiple hidden accept="image/*,.pdf,.txt,.md,.json,.csv">
           <input type="file" id="image-input" aria-label="Attach images" multiple hidden accept="image/*">
-          <p class="composer-hint">Backend not connected. Messages stay on this device.</p>
+          <p class="composer-hint">Conversations stay on this device.</p>
         </form>
       </section>
 
@@ -209,7 +233,7 @@
             <button type="button" id="account-create" class="btn btn-block">Create account</button>
             <button type="button" id="account-reset" class="btn btn-block">Reset password</button>
             <button type="button" id="account-logout" class="btn btn-block" hidden>Sign out</button>
-            <p class="section-note">Guest mode keeps conversations on this device. Sign in to enable authenticated cloud chat when the NYX backend is deployed.</p>
+            <p class="section-note">Conversations are stored locally on this device.</p>
           </div>
           <div>
             <h2 class="section-title">Data on this device</h2>
@@ -250,14 +274,14 @@
           <h1 id="models-title" class="topbar-title" tabindex="-1">Model information</h1>
         </header>
         <div class="scroll"><div class="page">
-          <div class="status-card" role="note"><svg class="i" aria-hidden="true"><use href="#i-alert"></use></svg><div><strong>No models connected</strong><span>FREE, PRO and MAX are tier selections in the interface. The descriptions below are planned behaviour.</span></div></div>
+          <div class="status-card" role="note"><svg class="i" aria-hidden="true"><use href="#i-alert"></use></svg><div><strong>FREE is available</strong><span>PRO and MAX are coming soon. Their descriptions are planned capabilities.</span></div></div>
           <div id="model-cards" class="stack-gap"></div>
           <div>
             <h2 class="section-title">How tiers are planned to work</h2>
             <div class="group">
               <div class="kv"><span>Request path</span><span>App → API gateway → model</span></div>
               <div class="kv"><span>Tier choice</span><span>Sent with each request</span></div>
-              <div class="kv"><span>Status</span><span>Not implemented</span></div>
+              <div class="kv"><span>Status</span><span>FREE available · PRO and MAX coming soon</span></div>
             </div>
           </div>
         </div></div>
@@ -274,16 +298,16 @@
           <div class="group">
             <div class="kv"><span>Version</span><span id="about-version"></span></div>
             <div class="kv"><span>Stage</span><span id="about-stage"></span></div>
-            <div class="kv"><span>AI backend</span><span>Not connected</span></div>
+            <div class="kv"><span>AI backend</span><span>Cloudflare Workers</span></div>
             <div class="kv"><span>Packaging</span><span>Capacitor for Android</span></div>
           </div>
           <div>
-            <h2 class="section-title">Planned integrations</h2>
+            <h2 class="section-title">Integrations</h2>
             <div class="group">
               <div class="kv"><span>API gateway</span><span>Cloudflare Workers</span></div>
-              <div class="kv"><span>Accounts and storage</span><span>Supabase</span></div>
+              <div class="kv"><span>Accounts</span><span>Firebase Authentication</span></div>
             </div>
-            <p class="section-note">Neither is implemented in this stage.</p>
+            <p class="section-note">Conversations are stored on this device.</p>
           </div>
           <a id="about-repo" class="btn btn-block" href="https://github.com/0-umbra/NYX-AI" target="_blank" rel="noopener noreferrer">Project on GitHub<svg class="i" aria-hidden="true"><use href="#i-external"></use></svg></a>
         </div></div>
@@ -296,10 +320,19 @@
     <div class="sheet-grip"></div>
     <h2 id="model-sheet-title">Choose a tier</h2>
     <div id="model-options" class="tier-list" role="radiogroup" aria-labelledby="model-sheet-title"></div>
-    <p class="sheet-note">Tier selection is a preview. No models are connected yet.</p>
+    <p class="sheet-note">FREE is available now. PRO and MAX are coming soon.</p>
     <form method="dialog" class="sheet-actions">
       <button type="button" id="model-compare" class="btn btn-ghost">Compare tiers</button>
       <button type="submit" id="model-sheet-close" class="btn btn-primary">Done</button>
+    </form>
+  </dialog>
+
+  <dialog id="rename-dialog" class="dialog" aria-labelledby="rename-title">
+    <form id="rename-form">
+      <h2 id="rename-title">Rename chat</h2>
+      <label class="field-label" for="rename-input">Conversation title</label>
+      <input id="rename-input" class="text-input" type="text" maxlength="80" required>
+      <div class="dialog-actions"><button type="button" id="rename-cancel" class="btn btn-ghost">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
     </form>
   </dialog>
 

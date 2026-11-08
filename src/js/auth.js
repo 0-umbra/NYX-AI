@@ -36,7 +36,13 @@ function friendlyError(error) {
   return messages[error?.code] || 'Authentication failed. Please try again.';
 }
 
-export function initAuth({ prefs }) {
+export function initAuth({ prefs, onSession, services = {
+  observe: (next, error) => onAuthStateChanged(auth, next, error),
+  signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
+  create: (email, password) => createUserWithEmailAndPassword(auth, email, password),
+  reset: (email) => sendPasswordResetEmail(auth, email),
+  logout: () => signOut(auth),
+} }) {
   const email = document.getElementById('account-email');
   const password = document.getElementById('account-password');
   const nameInput = document.getElementById('display-name');
@@ -84,7 +90,68 @@ export function initAuth({ prefs }) {
     }
   };
 
-  onAuthStateChanged(auth, user => showUser(user));
+  const screen = document.getElementById('auth-screen');
+  const app = document.getElementById('app');
+  const authEmail = document.getElementById('auth-email');
+  const authPassword = document.getElementById('auth-password');
+  const authError = document.getElementById('auth-error');
+  const submit = document.getElementById('auth-submit');
+  const loginTab = document.getElementById('auth-login-tab');
+  const createTab = document.getElementById('auth-create-tab');
+  let mode = 'login';
+  const setError = (message) => { authError.textContent = message; authError.hidden = !message; };
+  const setMode = (next) => {
+    mode = next;
+    loginTab.classList.toggle('is-active', mode === 'login');
+    createTab.classList.toggle('is-active', mode === 'create');
+    loginTab.setAttribute('aria-pressed', String(mode === 'login'));
+    createTab.setAttribute('aria-pressed', String(mode === 'create'));
+    submit.textContent = mode === 'login' ? 'Log In' : 'Create Account';
+    authPassword.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+    setError('');
+  };
+  loginTab.addEventListener('click', () => setMode('login'));
+  createTab.addEventListener('click', () => setMode('create'));
+  document.getElementById('auth-visibility').addEventListener('click', (event) => {
+    const visible = authPassword.type === 'password';
+    authPassword.type = visible ? 'text' : 'password';
+    event.currentTarget.textContent = visible ? 'Hide' : 'Show';
+    event.currentTarget.setAttribute('aria-pressed', String(visible));
+  });
+  document.getElementById('auth-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setError('');
+    if (!authEmail.validity.valid || !authEmail.value.trim()) { setError('Enter a valid email address.'); return; }
+    if (!authPassword.value) { setError('Enter your password.'); return; }
+    if (mode === 'create' && authPassword.value.length < 6) { setError('Choose a password with at least 6 characters.'); return; }
+    submit.disabled = true;
+    try {
+      if (mode === 'create') await services.create(authEmail.value.trim(), authPassword.value);
+      else await services.signIn(authEmail.value.trim(), authPassword.value);
+      authPassword.value = '';
+    } catch (error) { setError(friendlyError(error)); }
+    finally { submit.disabled = false; }
+  });
+  document.getElementById('auth-reset').addEventListener('click', async () => {
+    if (!authEmail.value.trim() || !authEmail.validity.valid) { setError('Enter a valid email address first.'); return; }
+    try { await services.reset(authEmail.value.trim()); setError(''); toast('Password reset email sent.'); }
+    catch (error) { setError(friendlyError(error)); }
+  });
+  services.observe((user) => {
+      showUser(user);
+      document.getElementById('auth-loading').hidden = true;
+      document.getElementById('auth-content').hidden = false;
+      screen.hidden = Boolean(user);
+      app.hidden = !user;
+      authPassword.value = '';
+      onSession?.(user);
+    }, () => {
+      document.getElementById('auth-loading').hidden = true;
+      document.getElementById('auth-content').hidden = false;
+      screen.hidden = false; app.hidden = true;
+      setError('Unable to restore your session. Please sign in again.');
+      onSession?.(null);
+    });
 
   signInButton?.addEventListener('click', async () => {
     if (!email.value.trim() || !password.value) {
@@ -94,7 +161,7 @@ export function initAuth({ prefs }) {
 
     setBusy(true);
     try {
-      await signInWithEmailAndPassword(auth, email.value.trim(), password.value);
+      await services.signIn(email.value.trim(), password.value);
       password.value = '';
       toast('Signed in successfully.');
     } catch (error) {
@@ -117,11 +184,7 @@ export function initAuth({ prefs }) {
 
     setBusy(true);
     try {
-      const credential = await createUserWithEmailAndPassword(
-        auth,
-        email.value.trim(),
-        password.value
-      );
+      const credential = await services.create(email.value.trim(), password.value);
 
       const displayName = nameInput?.value.trim();
       if (displayName) {
@@ -145,7 +208,7 @@ export function initAuth({ prefs }) {
 
     setBusy(true);
     try {
-      await sendPasswordResetEmail(auth, email.value.trim());
+      await services.reset(email.value.trim());
       toast('Password reset email sent.');
     } catch (error) {
       toast(friendlyError(error));
@@ -157,7 +220,7 @@ export function initAuth({ prefs }) {
   logoutButton?.addEventListener('click', async () => {
     setBusy(true);
     try {
-      await signOut(auth);
+      await services.logout();
       toast('Signed out. Your local conversations remain on this device.');
     } catch (error) {
       toast(friendlyError(error));

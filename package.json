@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.0",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "jsdom": "^31.0.0"
   }
 }

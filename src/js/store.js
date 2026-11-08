@@ -13,6 +13,8 @@ export function sanitize(raw) {
     .map((c) => ({
       id: c.id,
       title: String(c.title || DEFAULT_TITLE).slice(0, 80),
+      pinned: c.pinned === true,
+      titleEdited: c.titleEdited === true,
       model: typeof c.model === 'string' ? c.model : 'free',
       createdAt: Number(c.createdAt) || Date.now(),
       updatedAt: Number(c.updatedAt) || Date.now(),
@@ -60,7 +62,7 @@ export function createStore(storage) {
     },
     create(model = 'free') {
       const now = Date.now();
-      const conv = { id: uid(), title: DEFAULT_TITLE, model, createdAt: now, updatedAt: now, messages: [] };
+      const conv = { id: uid(), title: DEFAULT_TITLE, pinned: false, titleEdited: false, model, createdAt: now, updatedAt: now, messages: [] };
       convs.unshift(conv);
       if (convs.length > LIMITS.maxConversations) convs = this.list().slice(0, LIMITS.maxConversations);
       save();
@@ -74,7 +76,7 @@ export function createStore(storage) {
       if (kind) msg.kind = kind;
       conv.messages.push(msg);
       if (conv.messages.length > LIMITS.maxMessagesPerConversation) conv.messages.splice(0, conv.messages.length - LIMITS.maxMessagesPerConversation);
-      if (role === 'user' && conv.title === DEFAULT_TITLE) conv.title = titleFrom(msg.content || attachments[0]?.name || '');
+      if (role === 'user' && !conv.titleEdited && conv.title === DEFAULT_TITLE) conv.title = titleFrom(msg.content || attachments[0]?.name || '');
       conv.updatedAt = msg.ts;
       save();
       return msg;
@@ -94,7 +96,11 @@ export function createStore(storage) {
     },
     rename(id, title) {
       const conv = find(id);
-      if (conv) { conv.title = titleFrom(title); save(); }
+      if (conv && String(title).trim()) { conv.title = String(title).trim().slice(0, 80); conv.titleEdited = true; save(); }
+    },
+    setPinned(id, pinned) {
+      const conv = find(id);
+      if (conv) { conv.pinned = Boolean(pinned); save(); }
     },
     remove(id) {
       const before = convs.length;

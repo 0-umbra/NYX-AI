@@ -4,6 +4,7 @@
  */
 import { BACKEND, isBackendConfigured } from './config.js';
 import { getFirebaseIdToken } from './auth.js';
+import { isModelAvailable } from './models.js';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
@@ -60,12 +61,14 @@ export async function* createTransport({
   messages,
   model,
   signal
-}) {
+}, { getToken = getFirebaseIdToken, fetchRequest = fetch } = {}) {
   if (signal?.aborted) {
     throw new DOMException('Request cancelled.', 'AbortError');
   }
 
-  const token = await getFirebaseIdToken();
+  if (!isModelAvailable(model)) throw new Error('This model tier is not available yet.');
+
+  const token = await getToken();
   const endpoint = getEndpoint();
 
   const safeMessages = messages.slice(-12).map(message => ({
@@ -73,7 +76,7 @@ export async function* createTransport({
     content: message.content
   }));
 
-  const response = await fetch(endpoint, {
+  const response = await fetchRequest(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -97,11 +100,10 @@ export async function* createTransport({
   }
 
   if (!response.ok) {
-    throw new Error(
-      typeof data.error === 'string'
-        ? data.error
-        : 'The backend request failed.'
-    );
+    const message = response.status === 401 ? 'Your session has expired. Please sign in again.'
+      : response.status === 429 ? 'Too many requests. Please wait a moment and try again.'
+      : 'The AI service couldn’t respond. Please try again.';
+    throw new Error(message);
   }
 
   if (typeof data.reply !== 'string' || !data.reply.trim()) {

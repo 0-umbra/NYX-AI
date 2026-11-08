@@ -57,8 +57,15 @@ function boot() {
   chat.setTransport(createTransport);
   sidebar = initSidebar({ store, chat, router, storage });
   initSettings({ prefs, store, storage });
-  initAuth({ prefs });
   router.start();
+  initAuth({ prefs, onSession: (user) => {
+    if (!user) {
+      chat.newChat();
+      sidebar.close({ restoreFocus: false });
+      while (closeTopDialog()) { /* dismiss dialogs on sign out */ }
+    }
+    router.go('chat', { replace: true });
+  } });
   bindBackButton({ router, sidebar });
 
   // Debug / integration handle. Stage 3 registers its transport via NYX.chat.setTransport(fn).

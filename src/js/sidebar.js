@@ -54,7 +54,9 @@ export function initSidebar({ store, chat, router, storage }) {
     const active = c.id === chat.activeId;
     const title = escapeHtml(c.title);
     return `<li class="conv-item${active ? ' is-active' : ''}"><button type="button" class="conv-open" data-open="${escapeHtml(c.id)}"${active ? ' aria-current="true"' : ''}>${title}</button>`
-      + `<button type="button" class="conv-del" data-del="${escapeHtml(c.id)}" aria-label="Delete conversation: ${title}">${icon('trash')}</button></li>`;
+      + `<details class="conv-actions"><summary aria-label="Actions for ${title}" title="Conversation actions">⋯</summary><div class="conv-menu">`
+      + `<button type="button" data-rename="${escapeHtml(c.id)}">Rename</button><button type="button" data-pin="${escapeHtml(c.id)}">${c.pinned ? 'Unpin' : 'Pin'}</button>`
+      + `<button type="button" data-del="${escapeHtml(c.id)}">Delete</button></div></details></li>`;
   }
 
   function render() {
@@ -64,7 +66,9 @@ export function initSidebar({ store, chat, router, storage }) {
       list.innerHTML = `<p class="conv-empty">${q ? `No conversations match “${escapeHtml(q)}”.` : 'No conversations yet. Start a new chat and it will appear here.'}</p>`;
       return;
     }
-    const groups = q ? [{ label: `${items.length} ${items.length === 1 ? 'result' : 'results'}`, items }] : groupByDate(items);
+    const pinned = items.filter((c) => c.pinned);
+    const rest = items.filter((c) => !c.pinned);
+    const groups = [...(pinned.length ? [{ label: 'Pinned', items: pinned }] : []), ...(q ? (rest.length ? [{ label: 'Results', items: rest }] : []) : groupByDate(rest))];
     list.innerHTML = groups.map((g) =>
       `<section class="conv-group"><h2 class="conv-group-label">${escapeHtml(g.label)}</h2><ul>${g.items.map(itemHtml).join('')}</ul></section>`).join('');
   }
@@ -72,10 +76,25 @@ export function initSidebar({ store, chat, router, storage }) {
   list.addEventListener('click', async (e) => {
     const openBtn = e.target.closest('[data-open]');
     const delBtn = e.target.closest('[data-del]');
+    const renameBtn = e.target.closest('[data-rename]');
+    const pinBtn = e.target.closest('[data-pin]');
     if (openBtn) {
       chat.open(openBtn.dataset.open);
       router.go('chat');
       close({ restoreFocus: false });
+    } else if (renameBtn) {
+      const conv = store.get(renameBtn.dataset.rename);
+      if (!conv) return;
+      renameBtn.closest('details').open = false;
+      const dlg = $('rename-dialog');
+      const input = $('rename-input');
+      input.value = conv.title;
+      dlg.dataset.convId = conv.id;
+      dlg.showModal();
+      input.focus(); input.select();
+    } else if (pinBtn) {
+      const conv = store.get(pinBtn.dataset.pin);
+      if (conv) store.setPinned(conv.id, !conv.pinned);
     } else if (delBtn) {
       const conv = store.get(delBtn.dataset.del);
       if (!conv) return;
@@ -86,6 +105,16 @@ export function initSidebar({ store, chat, router, storage }) {
       toast('Conversation deleted');
     }
   });
+
+  $('rename-cancel').addEventListener('click', () => $('rename-dialog').close());
+  $('rename-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const title = $('rename-input').value.trim();
+    if (!title) { $('rename-input').setCustomValidity('Enter a conversation title.'); $('rename-input').reportValidity(); return; }
+    store.rename($('rename-dialog').dataset.convId, title);
+    $('rename-dialog').close();
+  });
+  $('rename-input').addEventListener('input', () => $('rename-input').setCustomValidity(''));
 
   const startNewChat = () => { chat.newChat(); router.go('chat'); close({ restoreFocus: false }); };
   $('sidebar-new').addEventListener('click', startNewChat);

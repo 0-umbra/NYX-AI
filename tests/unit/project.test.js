@@ -26,7 +26,7 @@ test('package.json: no frameworks and only Capacitor dependencies', () => {
   const deps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
   assert.ok(deps.length > 0);
   for (const d of deps) assert.ok(
-    /^@capacitor\//.test(d) || d === 'firebase' || d === 'esbuild',
+    /^@capacitor\//.test(d) || d === 'firebase' || d === 'esbuild' || d === 'jsdom',
     `unexpected dependency ${d}`
   );
   assert.ok(pkg.devDependencies.esbuild, 'esbuild must remain a development dependency');
@@ -82,7 +82,7 @@ test('repository hygiene: .gitignore, README, no secrets, no node_modules', () =
   const ignore = read('.gitignore');
   for (const entry of ['node_modules', '.env', 'www/', '*.keystore']) assert.ok(ignore.includes(entry), `.gitignore has ${entry}`);
   const readme = read('README.md');
-  for (const heading of ['Quick start', 'Termux', 'Known limitations', 'Cloudflare Workers', 'Supabase']) assert.ok(readme.includes(heading), `README mentions ${heading}`);
+  for (const heading of ['Development', 'Android', 'Data and behaviour', 'Cloudflare Worker', 'Firebase']) assert.ok(readme.includes(heading), `README mentions ${heading}`);
   const patterns = [/sk-[A-Za-z0-9]{20,}/, /AKIA[0-9A-Z]{16}/, /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/, /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
     /(api[_-]?key|secret|token|password)\s*[:=]\s*['"][A-Za-z0-9_\-./+]{16,}['"]/i];
   const files = [];
