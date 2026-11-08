@@ -550,15 +550,9 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
     return { problems: [`${apkPath}: ${error.message}`], matches };
   }
 
-  // Generate into memory once, so the packaged bytes can be compared with what we asked for.
-  const temp = path.join(path.dirname(apkPath), '.nyx-icon-check');
-  await mkdir(temp, { recursive: true });
+  // The expected rasters are regenerated in memory, so the packaged bytes can be compared
+  // byte-for-byte with what the launcher icon should contain. Nothing is written to disk here.
   const generated = new Map();
-  for (const relative of REQUIRED_FILES) {
-    const abs = path.join(temp, relative);
-    await mkdir(path.dirname(abs), { recursive: true });
-    if (expected.get(relative) === 0) await writeFile(abs, ADAPTIVE_XML, 'utf8');
-  }
   const logo = decodePng(await readFile(logoPath));
   const logoAverage = averageColor(logo.rgba, logo.width, logo.height);
   for (const density of DENSITIES) {

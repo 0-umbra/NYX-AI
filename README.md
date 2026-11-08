@@ -29,7 +29,7 @@ The Android launcher icon is the density buckets under `android/app/src/main/res
 - `drawable-<density>/ic_launcher_foreground.png` (108 dp × density) with the mark inside the 66 dp safe zone, and `ic_launcher_background.png` on the app's black;
 - `mipmap-anydpi-v26/ic_launcher.xml` / `ic_launcher_round.xml` referencing those drawables.
 
-It uses only Node built-ins, so it runs from a clean checkout. Run it after `cap sync` (which may rewrite `resources/`), then build:
+It uses only Node built-ins, so it runs from a clean checkout. Run it after `cap sync` — which may rewrite the Android resource tree from `resources/` — then build:
 
 ```sh
 npm run icons:android                              # generate + verify (fails the build on any problem)
