@@ -5,6 +5,7 @@
 import { BACKEND, isBackendConfigured } from './config.js';
 import { getFirebaseIdToken } from './auth.js';
 import { isModelAvailable } from './models.js';
+import { buildConversationHistory, isSendableHistory } from './history.js';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
@@ -68,13 +69,15 @@ export async function* createTransport({
 
   if (!isModelAvailable(model)) throw new Error('This model tier is not available yet.');
 
+  // Defence in depth: the chat view already builds bounded history, but the transport never
+  // forwards notices, blank turns, oversized content or a list that does not end with the user.
+  const safeMessages = buildConversationHistory(messages);
+  if (!isSendableHistory(safeMessages)) {
+    throw new Error('There is no message to send yet.');
+  }
+
   const token = await getToken();
   const endpoint = getEndpoint();
-
-  const safeMessages = messages.slice(-12).map(message => ({
-    role: message.role,
-    content: message.content
-  }));
 
   const response = await fetchRequest(endpoint, {
     method: 'POST',

@@ -1,6 +1,6 @@
 # NYX AI — project structure report
 
-Stage 2 (UI refinement 0.2.1). Line counts are from the delivered files. ZIP root = repository root (no enclosing folder).
+Stage 2 frontend with the connected Cloudflare Worker. Line counts are approximate. ZIP root = repository root (no enclosing folder).
 
 ```
 NYX-AI/
@@ -18,7 +18,10 @@ NYX-AI/
 │   │   └── components.css     318   Buttons, chips, welcome + suggestion cards, bubbles, Markdown, composer, dialogs, settings
 │   ├── js/
 │   │   ├── app.js              66   Entry point: wires modules, viewport/keyboard height, global errors, back button
-│   │   ├── chat.js            241   Messages, composer, attachments, scrolling, transport hook (Send/Stop/stream)
+│   │   ├── chat.js            262   Messages, composer, attachments, scrolling, transport hook (Send/Stop/reveal)
+│   │   ├── history.js          82   Conversation context sent to the Worker (bounded, cleaned, newest turn once)
+│   │   ├── transport.js       117   Firebase-authenticated POST /chat, response size limit, error mapping
+│   │   ├── reveal.js           17   Progressive reveal of the returned reply (not network streaming)
 │   │   ├── sidebar.js         122   Drawer + collapsible rail, search, history, delete, swipe-to-close
 │   │   ├── settings.js        124   Preferences, Appearance/Account/Memory behaviour, reset data
 │   │   ├── models.js           79   FREE/PRO/MAX data, selector sheet, model information cards
@@ -28,11 +31,11 @@ NYX-AI/
 │   │   ├── ui.js               98   Toast, confirm dialog, clipboard, icons, radio groups
 │   │   ├── markdown.js        135   Safe Markdown renderer (escapes everything, http/https/mailto links only)
 │   │   ├── highlight.js        70   Dependency-free syntax highlighter
-│   │   ├── config.js           30   App info, BACKEND/SUPABASE placeholders (null), limits
+│   │   ├── config.js           36   App info, BACKEND URL, conversation-history limits
 │   │   └── util.js             18   escapeHtml, uid, formatBytes, plural
 │   └── assets/
-│       ├── logo/nyx-mark.svg        Original NYX AI mark (N + star)
-│       └── icons/                   icon-192.png, icon-512.png, icon-maskable-512.png
+│       ├── logo/nyx-mark.png        NYX AI logo (supplied asset, 512 x 512 square)
+│       └── icons/                   icon-192.png, icon-512.png, icon-maskable-512.png (from the logo)
 ├── resources/                       icon-only / foreground / background 1024px PNGs for @capacitor/assets
 ├── scripts/
 │   ├── dev-server.js           65   Zero-dependency dev server (serves only index.html, manifest, src/)
@@ -51,11 +54,26 @@ NYX-AI/
 ## Module dependencies
 
 `app.js` → storage, store, router, settings, models, chat, sidebar, ui.
-`chat.js` → markdown, util, config, ui. `markdown.js` → highlight, util. `sidebar.js` → store (grouping), util, ui.
-Pure modules (no DOM at import time, unit-testable in Node): config, util, storage, store, router, models, markdown, highlight, settings (prefs).
+`chat.js` → markdown, util, config, history, reveal, models, ui. `transport.js` → config, auth, models, history.
+`markdown.js` → highlight, util. `sidebar.js` → store (grouping), util, ui.
+Pure modules (no DOM at import time, unit-testable in Node): config, util, storage, store, history, router, models, markdown, highlight, settings (prefs).
 
 ## Changes in this refinement (0.2.0 → 0.2.1)
 
 Modified: `index.html`, `variables.css`, `layout.css`, `components.css`, `chat.js`, `sidebar.js`, `app.js`, `config.js`, `package.json`, tests, README.
 Added: `image` button + hidden image input, `sidebar-toggle` / `sidebar-search-btn` / `sidebar-models`, icons (image, panel), this `docs/` update.
 Unchanged behaviour: routing, stores, settings, model selector, Markdown, transport hook, dev server, build.
+
+## Conversation context (current branch)
+
+Modified: `src/js/history.js` (new), `src/js/chat.js`, `src/js/transport.js`, `src/js/config.js`, `src/js/app.js`,
+`backend/src/index.js`, `backend/test/index.test.js`, `tests/unit/context.test.js` (new), `tests/unit/project.test.js`,
+`index.html` (logo), `scripts/generate-icons.mjs`, icon PNGs, README, docs.
+
+- `history.js` builds the request messages from the open conversation only: user/assistant turns, newest turn last and
+  once, notices/blank turns/empty placeholders dropped, bounded to 16 messages, 4000 characters per message and
+  12000 characters in total.
+- `chat.js` remembers the open conversation (`activeConversation`) so a reload or WebView restart continues the same
+  chat, and explains attachment-only messages instead of sending an empty turn.
+- `backend/src/index.js` re-validates the same rules (`buildConversationMessages`), keeps Firebase token verification,
+  UID rate limiting and the FREE model id, and forwards the history to Workers AI with a continuity-aware system prompt.

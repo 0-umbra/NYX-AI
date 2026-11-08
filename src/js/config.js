@@ -27,6 +27,11 @@ export const LIMITS = Object.freeze({
   maxAttachmentBytes: 10 * 1024 * 1024,
   maxConversations: 100,
   maxMessagesPerConversation: 500,
+  // Conversation context sent with each request. Must stay inside the Worker limits
+  // (24 messages, 4000 characters per message, 24000 characters in total).
+  maxHistoryMessages: 16,
+  maxHistoryMessageChars: 4000,
+  maxHistoryTotalChars: 12000,
 });
 
 export const isBackendConfigured = () => Boolean(BACKEND.baseUrl);

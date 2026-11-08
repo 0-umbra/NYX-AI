@@ -1,4 +1,34 @@
-# NYX AI — testing report (Stage 2, UI refinement 0.2.1)
+# NYX AI — testing report
+
+## Conversation context update (current branch)
+
+All results below come from commands executed on this branch. Nothing is estimated; the
+Cloudflare Worker was **not deployed** (dry run only) and the optional Playwright suite was **not** run.
+
+| Suite | Command | Result |
+| --- | --- | --- |
+| Frontend unit + static checks | `npm test` | **62 / 62 passed**, 0 failed (~11.6 s) |
+| Conversation-context regressions | `node --test tests/unit/context.test.js` | **17 / 17 passed** |
+| Backend (Worker) tests | `cd backend && npm test` | **28 / 28 passed** (~0.4 s) |
+| Production build | `npm run build` | Built `www/` (index.html, manifest, bundled `app.bundle.js`, logo and icons) |
+| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled, 10.94 KiB upload / 3.72 KiB gzip; bindings `env.AI`, `env.CHAT_LIMITER` |
+| Browser end-to-end | `npm run test:e2e` | Not run (Playwright/Chromium are not installed here) |
+
+Conversation-context cases covered: related follow-up, pronoun follow-up ("he", "that character"),
+several follow-ups in one chat, a new chat starting empty, switching between two chats without mixing
+histories, reopening an older conversation, a long conversation using a bounded window, the newest
+message sent exactly once, local notices / blank messages / empty placeholders never sent, the open
+conversation restored after a reload, and the Worker forwarding + validating history (leading assistant
+dropped, blank turns ignored, client `system` messages rejected, 24-message cap, oversized history
+trimmed from the oldest turn, oversized body rejected).
+
+Not verified here: a live call to the deployed Worker and Workers AI with a real Firebase session
+(no credentials or network access in this environment). The FREE model id, authentication, origin
+checks, UID rate limiting and progressive reveal are unchanged.
+
+---
+
+# Earlier run — Stage 2, UI refinement 0.2.1
 
 All results below come from the final run on the delivered source. Nothing is estimated.
 

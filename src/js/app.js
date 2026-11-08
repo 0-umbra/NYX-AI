@@ -53,7 +53,7 @@ function boot() {
   let sidebar;
   const router = createRouter({ onChange: (name) => { if (name === 'chat') chat?.scrollToBottom(); else sidebar?.close({ restoreFocus: false }); } });
   const models = initModels({ storage, onCompare: () => router.go('models') });
-  chat = initChat({ store, getModelId: () => models.id });
+  chat = initChat({ store, storage, getModelId: () => models.id });
   chat.setTransport(createTransport);
   sidebar = initSidebar({ store, chat, router, storage });
   initSettings({ prefs, store, storage });
