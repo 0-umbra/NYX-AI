@@ -531,6 +531,203 @@ export function readZipEntries(buffer) {
   return { entries, read };
 }
 
+// Android's compiled resource formats use little-endian, size-prefixed chunks. Reject
+// malformed chunks rather than guessing at an icon's structure or resource references.
+function androidChunk(buf, offset, limit = buf.length) {
+  if (offset < 0 || offset + 8 > limit) throw new Error('truncated Android resource chunk');
+  const type = buf.readUInt16LE(offset);
+  const header = buf.readUInt16LE(offset + 2);
+  const size = buf.readUInt32LE(offset + 4);
+  if (header < 8 || size < header || offset + size > limit) throw new Error('invalid Android resource chunk size');
+  return { type, header, size, start: offset, end: offset + size };
+}
+
+function androidStrings(buf, chunk) {
+  if (chunk.type !== 1 || chunk.header < 28) throw new Error('invalid Android string pool');
+  const count = buf.readUInt32LE(chunk.start + 8);
+  const flags = buf.readUInt32LE(chunk.start + 16);
+  const start = buf.readUInt32LE(chunk.start + 20);
+  if (count > Math.floor((chunk.size - chunk.header) / 4) || start < chunk.header + count * 4 || start > chunk.size)
+    throw new Error('invalid Android string pool offsets');
+  const utf8 = (flags & 0x100) !== 0;
+  const getLength = (pos, unit) => {
+    if (pos + unit > chunk.end) throw new Error('truncated Android string length');
+    let n = unit === 1 ? buf[pos] : buf.readUInt16LE(pos);
+    pos += unit;
+    const mask = unit === 1 ? 0x80 : 0x8000;
+    if (n & mask) {
+      if (pos + unit > chunk.end) throw new Error('truncated Android string length');
+      const next = unit === 1 ? buf[pos] : buf.readUInt16LE(pos);
+      n = ((n & (mask - 1)) * (mask * 2)) + next;
+      pos += unit;
+    }
+    return [n, pos];
+  };
+  return Array.from({ length: count }, (_, i) => {
+    let pos = chunk.start + start + buf.readUInt32LE(chunk.start + chunk.header + i * 4);
+    if (pos < chunk.start + start || pos >= chunk.end) throw new Error('invalid Android string offset');
+    let length;
+    if (utf8) [, pos] = getLength(pos, 1); // UTF-16 character count
+    [length, pos] = getLength(pos, utf8 ? 1 : 2);
+    const bytes = length * (utf8 ? 1 : 2);
+    if (pos + bytes + (utf8 ? 1 : 2) > chunk.end || (utf8 ? buf[pos + bytes] : buf.readUInt16LE(pos + bytes)) !== 0)
+      throw new Error('truncated Android string');
+    return buf.toString(utf8 ? 'utf8' : 'utf16le', pos, pos + bytes);
+  });
+}
+
+function androidRoot(buf, type) {
+  const root = androidChunk(buf, 0);
+  if (root.type !== type || root.size !== buf.length) throw new Error('invalid Android resource root');
+  return root;
+}
+
+function androidChildren(buf, root) {
+  const children = [];
+  for (let pos = root.start + root.header; pos < root.end;) {
+    const child = androidChunk(buf, pos, root.end);
+    children.push(child);
+    pos = child.end;
+  }
+  return children;
+}
+
+/** Extract the two typed drawable references from a compiled adaptive-icon XML tree. */
+function adaptiveReferences(buf) {
+  const chunks = androidChildren(buf, androidRoot(buf, 3));
+  const pools = chunks.filter((c) => c.type === 1);
+  if (pools.length !== 1) throw new Error('missing or duplicate XML string pool');
+  const strings = androidStrings(buf, pools[0]);
+  const maps = chunks.filter((c) => c.type === 0x0180);
+  if (maps.length !== 1 || (maps[0].size - maps[0].header) % 4) throw new Error('invalid XML resource map');
+  const map = maps[0];
+  const stringAt = (index) => {
+    if (index === 0xffffffff) return null;
+    if (index >= strings.length) throw new Error('invalid XML string index');
+    return strings[index];
+  };
+  const stack = [];
+  const references = {};
+  let rootSeen = false;
+  let rootClosed = false;
+  for (const c of chunks) {
+    if (c.type === 0x0102) { // RES_XML_START_ELEMENT_TYPE
+      if (c.header < 16 || c.size < c.header + 20) throw new Error('truncated XML start element');
+      const ext = c.start + c.header;
+      const ns = stringAt(buf.readUInt32LE(ext));
+      const name = stringAt(buf.readUInt32LE(ext + 4));
+      const attrStart = buf.readUInt16LE(ext + 8);
+      const attrSize = buf.readUInt16LE(ext + 10);
+      const count = buf.readUInt16LE(ext + 12);
+      if (attrStart < 20 || attrSize < 20 || ext + attrStart + count * attrSize > c.end)
+        throw new Error('invalid XML attributes');
+      if (ns !== null || !name) throw new Error('unexpected XML element namespace');
+      if (!stack.length) {
+        if (rootSeen || rootClosed || name !== 'adaptive-icon') throw new Error('not an adaptive-icon root');
+        rootSeen = true;
+      } else if (stack.length !== 1 || !['background', 'foreground'].includes(name) || Object.hasOwn(references, name)) {
+        throw new Error('unexpected or duplicate adaptive-icon layer');
+      }
+      let drawable;
+      for (let i = 0; i < count; i++) {
+        const a = ext + attrStart + i * attrSize;
+        const attrNs = stringAt(buf.readUInt32LE(a));
+        const attrIndex = buf.readUInt32LE(a + 4);
+        const attrName = stringAt(attrIndex);
+        stringAt(buf.readUInt32LE(a + 8)); // raw value, if present
+        if (buf.readUInt16LE(a + 12) !== 8 || buf[a + 14] !== 0) throw new Error('invalid XML typed value');
+        if (attrNs === 'http://schemas.android.com/apk/res/android' && attrName === 'drawable') {
+          if (attrIndex >= (map.size - map.header) / 4 || buf.readUInt32LE(map.start + map.header + attrIndex * 4) !== 0x01010199)
+            throw new Error('invalid android:drawable attribute ID');
+          if (drawable !== undefined || buf[a + 15] !== 1) throw new Error('drawable must be a resource reference');
+          drawable = buf.readUInt32LE(a + 16);
+        }
+      }
+      if (stack.length) {
+        if (!drawable) throw new Error(`missing ${name} drawable reference`);
+        references[name] = drawable;
+      }
+      stack.push(name);
+    } else if (c.type === 0x0103) { // RES_XML_END_ELEMENT_TYPE
+      if (c.header < 16 || c.size < c.header + 8) throw new Error('truncated XML end element');
+      const ext = c.start + c.header;
+      const ns = stringAt(buf.readUInt32LE(ext));
+      const name = stringAt(buf.readUInt32LE(ext + 4));
+      if (ns !== null || !stack.length || stack.pop() !== name) throw new Error('unbalanced XML elements');
+      if (!stack.length) rootClosed = true;
+    } else if (c.type === 0x0104) {
+      throw new Error('unexpected XML text');
+    } else if (![1, 0x0180, 0x0100, 0x0101].includes(c.type)) {
+      throw new Error('unsupported XML chunk');
+    }
+  }
+  if (!rootClosed || stack.length || !references.foreground || !references.background)
+    throw new Error('incomplete adaptive-icon');
+  return references;
+}
+
+/** Resolve a resource ID through resources.arsc to its type, name and file paths. */
+function resolveDrawable(buf, id) {
+  const root = androidRoot(buf, 2);
+  const top = androidChildren(buf, root);
+  const pools = top.filter((c) => c.type === 1);
+  if (pools.length !== 1) throw new Error('missing resource table string pool');
+  const values = androidStrings(buf, pools[0]);
+  const packageId = id >>> 24;
+  const typeId = (id >>> 16) & 0xff;
+  const entryId = id & 0xffff;
+  const packages = top.filter((c) => c.type === 0x0200 && c.header >= 284 && buf.readUInt32LE(c.start + 8) === packageId);
+  if (packages.length !== 1) throw new Error('resource package not found or ambiguous');
+  const pkg = packages[0];
+  const typeOffset = pkg.header >= 288 ? buf.readUInt32LE(pkg.start + 284) : 0;
+  const types = androidStrings(buf, androidChunk(buf, pkg.start + buf.readUInt32LE(pkg.start + 268), pkg.end));
+  const keys = androidStrings(buf, androidChunk(buf, pkg.start + buf.readUInt32LE(pkg.start + 276), pkg.end));
+  const files = new Set();
+  let key;
+  for (const c of androidChildren(buf, pkg)) {
+    if (c.type !== 0x0201) continue;
+    if (c.header < 24) throw new Error('invalid resource type header');
+    const localType = buf[c.start + 8];
+    if (localType + typeOffset !== typeId) continue;
+    const flags = buf[c.start + 9];
+    const count = buf.readUInt32LE(c.start + 12);
+    const entriesStart = buf.readUInt32LE(c.start + 16);
+    if (flags & ~3 || flags === 3 || entriesStart < c.header || entriesStart > c.size)
+      throw new Error('invalid resource type offsets');
+    const offsetWidth = flags & 2 ? 2 : 4;
+    if (count > Math.floor((entriesStart - c.header) / offsetWidth)) throw new Error('truncated resource offsets');
+    let offset;
+    if (flags & 1) {
+      for (let i = 0; i < count; i++) {
+        const pos = c.start + c.header + i * 4;
+        if (buf.readUInt16LE(pos) === entryId) { offset = buf.readUInt16LE(pos + 2) * 4; break; }
+      }
+    } else if (entryId < count) {
+      const pos = c.start + c.header + entryId * offsetWidth;
+      const n = offsetWidth === 2 ? buf.readUInt16LE(pos) : buf.readUInt32LE(pos);
+      if (n !== (offsetWidth === 2 ? 0xffff : 0xffffffff)) offset = offsetWidth === 2 ? n * 4 : n;
+    }
+    if (offset === undefined) continue;
+    const pos = c.start + entriesStart + offset;
+    if (pos + 16 > c.end) throw new Error('truncated resource entry');
+    const entrySize = buf.readUInt16LE(pos);
+    const entryFlags = buf.readUInt16LE(pos + 2);
+    const keyIndex = buf.readUInt32LE(pos + 4);
+    if (entrySize < 8 || (entryFlags & ~2) !== 0 || pos + entrySize + 8 > c.end || keyIndex >= keys.length)
+      throw new Error('unsupported resource entry');
+    const value = pos + entrySize;
+    const valueIndex = buf.readUInt32LE(value + 4);
+    if (buf.readUInt16LE(value) !== 8 || buf[value + 2] !== 0 || buf[value + 3] !== 3 || valueIndex >= values.length)
+      throw new Error('drawable resource is not a file');
+    if (key !== undefined && key !== keys[keyIndex]) throw new Error('inconsistent resource name');
+    key = keys[keyIndex];
+    files.add(values[valueIndex]);
+  }
+  const typeName = types[typeId - typeOffset - 1];
+  if (!key || !typeName || !files.size) throw new Error('unresolved drawable resource');
+  return { type: typeName, name: key, files };
+}
+
 /**
  * Verifies that a built APK really contains the NYX AI launcher icon.
  * Returns `{ problems, matches }` where `matches` lists entries whose bytes are identical
@@ -571,9 +768,14 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
   }
 
   const findEntry = (relative) => {
-    const suffix = `res/${relative}`;
-    for (const name of zip.entries.keys()) {
-      if (name === suffix || name.endsWith(`/${suffix}`)) return name;
+    const candidates = [`res/${relative}`];
+    if (/^(?:mipmap|drawable)-(?:mdpi|hdpi|xhdpi|xxhdpi|xxxhdpi)\//.test(relative)) {
+      candidates.push(`res/${relative.replace('/', '-v4/')}`);
+    }
+    for (const suffix of candidates) {
+      for (const name of zip.entries.keys()) {
+        if (name === suffix || name.endsWith(`/${suffix}`)) return name;
+      }
     }
     return null;
   };
@@ -584,16 +786,41 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
       problems.push(`APK is missing res/${relative}`);
       continue;
     }
-    const data = zip.read(name);
+    let data;
+    try {
+      data = zip.read(name);
+    } catch (error) {
+      problems.push(`APK entry res/${relative} could not be read (${error.message})`);
+      continue;
+    }
     if (data === null) {
       problems.push(`APK entry res/${relative} could not be read`);
       continue;
     }
     const size = expected.get(relative);
     if (size === 0) {
-      const text = data.toString('utf8');
-      if (!/<adaptive-icon/.test(text) || !/ic_launcher_foreground/.test(text)) {
-        problems.push(`APK res/${relative} is not a valid adaptive icon`);
+      try {
+        const refs = adaptiveReferences(data);
+        const table = zip.read('resources.arsc');
+        if (!table) throw new Error('missing resources.arsc');
+        for (const layer of ['background', 'foreground']) {
+          const resource = resolveDrawable(table, refs[layer]);
+          if (resource.type !== 'drawable' || resource.name !== `ic_launcher_${layer}`)
+            throw new Error(`${layer} references the wrong drawable`);
+          const verifiedFiles = new Set();
+          for (const density of DENSITIES) {
+            const entry = findEntry(`drawable-${density.name}/ic_launcher_${layer}.png`);
+            if (!entry || !resource.files.has(entry)) throw new Error(`${layer} does not resolve to ${density.name} drawable`);
+            verifiedFiles.add(entry);
+          }
+          // Another configuration may be selected instead of these PNGs by Android.
+          // It cannot be treated as verified just because the five PNGs also exist.
+          for (const file of resource.files) {
+            if (!verifiedFiles.has(file)) throw new Error(`${layer} has an unverified drawable configuration: ${file}`);
+          }
+        }
+      } catch (error) {
+        problems.push(`APK res/${relative} is not a valid adaptive icon (${error.message})`);
       }
       continue;
     }

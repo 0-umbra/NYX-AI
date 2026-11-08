@@ -99,6 +99,104 @@ function buildZip(files) {
   return Buffer.concat([...chunks, cdBuf, eocd]);
 }
 
+// Small compiled Android XML/resource-table fixtures. Resource IDs are deliberately
+// numeric: a string search in the XML cannot prove which drawable they reference.
+function chunk(type, header, body) {
+  header.writeUInt16LE(type, 0);
+  header.writeUInt16LE(header.length, 2);
+  header.writeUInt32LE(header.length + body.length, 4);
+  return Buffer.concat([header, body]);
+}
+function strings(items) {
+  let offset = 0;
+  const offsets = Buffer.alloc(items.length * 4);
+  const data = items.map((item, i) => {
+    const bytes = Buffer.from(item);
+    const length = (n) => n < 128 ? [n] : [0x80 | (n >> 8), n & 0xff];
+    offsets.writeUInt32LE(offset, i * 4);
+    const value = Buffer.concat([Buffer.from([...length(item.length), ...length(bytes.length)]), bytes, Buffer.from([0])]);
+    offset += value.length;
+    return value;
+  });
+  const raw = Buffer.concat(data);
+  const padded = Buffer.concat([raw, Buffer.alloc((4 - raw.length % 4) % 4)]);
+  const header = Buffer.alloc(28);
+  header.writeUInt32LE(items.length, 8);
+  header.writeUInt32LE(0x100, 16);
+  header.writeUInt32LE(28 + offsets.length, 20);
+  return chunk(1, header, Buffer.concat([offsets, padded]));
+}
+const BG_ID = 0x7f010000;
+const FG_ID = 0x7f010001;
+function binaryXml({ background = BG_ID, foreground = FG_ID, root = 'adaptive-icon', omitForeground = false, attributeId = 0x01010199, foregroundType = 1 } = {}) {
+  const words = [root, 'background', 'foreground', 'drawable', 'http://schemas.android.com/apk/res/android'];
+  const start = (name, reference) => {
+    const header = Buffer.alloc(16);
+    const ext = Buffer.alloc(20);
+    ext.writeUInt32LE(0xffffffff, 0);
+    ext.writeUInt32LE(words.indexOf(name), 4);
+    ext.writeUInt16LE(20, 8);
+    ext.writeUInt16LE(20, 10);
+    ext.writeUInt16LE(reference === undefined ? 0 : 1, 12);
+    const attr = reference === undefined ? Buffer.alloc(0) : Buffer.alloc(20);
+    if (attr.length) {
+      attr.writeUInt32LE(4, 0); attr.writeUInt32LE(3, 4); attr.writeUInt32LE(0xffffffff, 8);
+      attr.writeUInt16LE(8, 12); attr[15] = name === 'foreground' ? foregroundType : 1; attr.writeUInt32LE(reference, 16);
+    }
+    return chunk(0x102, header, Buffer.concat([ext, attr]));
+  };
+  const end = (name) => {
+    const ext = Buffer.alloc(8);
+    ext.writeUInt32LE(0xffffffff, 0); ext.writeUInt32LE(words.indexOf(name), 4);
+    return chunk(0x103, Buffer.alloc(16), ext);
+  };
+  const map = Buffer.alloc(16); map.writeUInt32LE(attributeId, 12);
+  const nodes = [strings(words), chunk(0x180, Buffer.alloc(8), map), start(root), start('background', background), end('background')];
+  if (!omitForeground) nodes.push(start('foreground', foreground), end('foreground'));
+  nodes.push(end(root));
+  return chunk(3, Buffer.alloc(8), Buffer.concat(nodes));
+}
+function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foreground', badPath = false, extraForeground = false } = {}) {
+  const densities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];
+  const values = densities.flatMap((d) => [
+    `res/drawable-${d}${qualifier}/ic_launcher_background.png`,
+    `res/drawable-${d}${qualifier}/${badPath && d === 'mdpi' ? 'other' : 'ic_launcher_foreground'}.png`,
+  ]);
+  const extraIndex = values.length;
+  values.push('long-resource-path-' + 'x'.repeat(200)); // exercise two-byte UTF-8 lengths
+  if (extraForeground) values.push('res/drawable-v24/ic_launcher_foreground.xml');
+  const typeStrings = strings(['drawable']);
+  const keyStrings = strings(['ic_launcher_background', foregroundName]);
+  const configs = densities.map((d, i) => {
+    const header = Buffer.alloc(24);
+    header[8] = 1; header.writeUInt32LE(2, 12); header.writeUInt32LE(32, 16);
+    const offsets = Buffer.alloc(8);
+    offsets.writeUInt32LE(0, 0); offsets.writeUInt32LE(16, 4);
+    const entries = Buffer.alloc(32);
+    for (let j = 0; j < 2; j++) {
+      const pos = j * 16;
+      entries.writeUInt16LE(8, pos); entries.writeUInt32LE(j, pos + 4);
+      entries.writeUInt16LE(8, pos + 8); entries[pos + 11] = 3; entries.writeUInt32LE(i * 2 + j, pos + 12);
+    }
+    return chunk(0x201, header, Buffer.concat([offsets, entries]));
+  });
+  if (extraForeground) {
+    const header = Buffer.alloc(24);
+    header[8] = 1; header.writeUInt32LE(2, 12); header.writeUInt32LE(32, 16);
+    const offsets = Buffer.alloc(8); offsets.writeUInt32LE(0xffffffff, 0); offsets.writeUInt32LE(0, 4);
+    const entry = Buffer.alloc(16); entry.writeUInt16LE(8, 0); entry.writeUInt32LE(1, 4);
+    entry.writeUInt16LE(8, 8); entry[11] = 3; entry.writeUInt32LE(extraIndex + 1, 12);
+    configs.push(chunk(0x201, header, Buffer.concat([offsets, entry])));
+  }
+  const pkg = Buffer.alloc(288);
+  pkg.writeUInt32LE(0x7f, 8);
+  pkg.writeUInt32LE(288, 268);
+  pkg.writeUInt32LE(288 + typeStrings.length, 276);
+  const packageChunk = chunk(0x200, pkg, Buffer.concat([typeStrings, keyStrings, ...configs]));
+  const table = Buffer.alloc(12); table.writeUInt32LE(1, 8);
+  return chunk(2, table, Buffer.concat([strings(values), packageChunk]));
+}
+
 // --------------------------------------------------------------------------------------
 
 test('android icons: the official logo is the only source and it is square', async () => {
@@ -311,11 +409,14 @@ test('android icons: the generated set is exactly what an APK is checked against
   try {
     await generateIcons(out);
 
-    // A realistic APK: every launcher icon resource plus unrelated entries, one deflated.
+    // AAPT2 uses v4 on density directories and compiles XML references to IDs.
     const entries = [];
     for (const relative of REQUIRED_FILES) {
-      entries.push({ name: `res/${relative}`, data: await readFile(path.join(out, relative)) });
+      const raster = relative.endsWith('.png');
+      const name = raster ? relative.replace('/', '-v4/') : relative;
+      entries.push({ name: `res/${name}`, data: raster ? await readFile(path.join(out, relative)) : binaryXml() });
     }
+    entries.push({ name: 'resources.arsc', data: resourceTable(), method: 8 });
     entries.push({ name: 'AndroidManifest.xml', data: Buffer.from('<manifest/>'), method: 8 });
     entries.push({ name: 'classes.dex', data: Buffer.from('dex\n') });
     const apkPath = path.join(apk, 'app-debug.apk');
@@ -324,6 +425,43 @@ test('android icons: the generated set is exactly what an APK is checked against
     const result = await verifyApkIcons(apkPath);
     assert.deepEqual(result.problems, [], `packaged icons are valid: ${result.problems.join('; ')}`);
     assert.equal(result.matches.length, 20, 'every packaged raster is byte-identical to the generated set');
+
+    const xmlName = 'res/mipmap-anydpi-v26/ic_launcher.xml';
+    const checkChange = async (name, data, pattern) => {
+      const modified = entries.map((entry) => entry.name === name ? { ...entry, data } : entry);
+      await writeFile(apkPath, buildZip(modified));
+      const checked = await verifyApkIcons(apkPath);
+      assert.ok(checked.problems.some((problem) => pattern.test(problem)), checked.problems.join('; '));
+    };
+    await checkChange(xmlName, binaryXml({ root: 'not-adaptive' }), /not an adaptive-icon root/);
+    await checkChange(xmlName, binaryXml({ omitForeground: true }), /incomplete adaptive-icon/);
+    await checkChange(xmlName, binaryXml({ foreground: BG_ID }), /foreground references the wrong drawable/);
+    await checkChange(xmlName, binaryXml({ background: FG_ID }), /background references the wrong drawable/);
+    await checkChange(xmlName, binaryXml({ foregroundType: 3 }), /drawable must be a resource reference/);
+    await checkChange(xmlName, binaryXml({ attributeId: 0x01010000 }), /invalid android:drawable attribute ID/);
+    await checkChange(xmlName, binaryXml({ foreground: 0x7f010099 }), /unresolved drawable resource/);
+    await checkChange(xmlName, binaryXml().subarray(0, 32), /invalid Android resource/);
+    await checkChange(xmlName, Buffer.from('<adaptive-icon>ic_launcher_foreground</adaptive-icon>'), /invalid Android resource/);
+    await checkChange('resources.arsc', resourceTable({ badPath: true }), /does not resolve to mdpi drawable/);
+    await checkChange('resources.arsc', resourceTable({ foregroundName: 'placeholder' }), /wrong drawable/);
+    await checkChange('resources.arsc', resourceTable({ extraForeground: true }), /unverified drawable configuration: res\/drawable-v24\/ic_launcher_foreground.xml/);
+    await checkChange('resources.arsc', Buffer.from('corrupt'), /Android resource/);
+    await checkChange('res/mipmap-mdpi-v4/ic_launcher.png', encodePng(7, 7, Buffer.alloc(196)), /expected 48x48, found 7x7/);
+    await checkChange('res/mipmap-mdpi-v4/ic_launcher_round.png', encodePng(48, 48, Buffer.alloc(48 * 48 * 4, 255)), /opaque corners/);
+    await checkChange('res/mipmap-mdpi-v4/ic_launcher.png', Buffer.from('bad PNG'), /not a readable PNG/);
+    await checkChange('res/mipmap-mdpi-v4/ic_launcher.png', encodePng(48, 48, Buffer.alloc(48 * 48 * 4, 255)), /does not contain the NYX AI logo/);
+    await writeFile(apkPath, buildZip(entries.filter((entry) => entry.name !== 'res/drawable-mdpi-v4/ic_launcher_foreground.png')));
+    const missingLayer = await verifyApkIcons(apkPath);
+    assert.ok(missingLayer.problems.some((p) => /missing res\/drawable-mdpi\/ic_launcher_foreground/.test(p)));
+    assert.ok(missingLayer.problems.some((p) => /foreground does not resolve to mdpi drawable/.test(p)));
+    await writeFile(apkPath, Buffer.from('not a zip'));
+    assert.match((await verifyApkIcons(apkPath)).problems[0], /not a ZIP\/APK/);
+
+    // The original unqualified paths remain supported, too.
+    const unqualified = entries.map((entry) => ({ ...entry, name: entry.name.replace(/-v4\//, '/') }));
+    unqualified.find((entry) => entry.name === 'resources.arsc').data = resourceTable({ qualifier: '' });
+    await writeFile(apkPath, buildZip(unqualified));
+    assert.deepEqual((await verifyApkIcons(apkPath)).problems, []);
 
     // An APK without the launcher icon must fail.
     const emptyPath = path.join(apk, 'empty.apk');
