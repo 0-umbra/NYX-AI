@@ -80,7 +80,7 @@ export function expectedSizes() {
 export const REQUIRED_FILES = [...expectedSizes().keys()].sort();
 
 // ---------------------------------------------------------------------------
-// Minimal PNG codec (8-bit, non-interlaced; colour types 0, 2, 3, 4 and 6).
+// Minimal PNG codec (colour types 0, 2, 3, 4 and 6).
 // ---------------------------------------------------------------------------
 
 const CRC_TABLE = (() => {
@@ -156,72 +156,103 @@ function unfilter(filter, line, prev, bpp) {
   }
 }
 
-/** Decodes a PNG into `{ width, height, rgba }` (RGBA8). Throws on anything it cannot handle. */
+/** Decode PNGs to RGBA8, validating chunk structure and CRCs. */
 export function decodePng(buf) {
   if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
   if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error('not a PNG file');
-
-  let ihdr;
-  let plte = null;
-  let trns = null;
+  let ihdr, plte, trns;
   const idat = [];
-  let pos = 8;
-  while (pos + 8 <= buf.length) {
+  let pos = 8, ended = false, idatEnded = false;
+  while (pos < buf.length) {
+    if (pos + 12 > buf.length) throw new Error('truncated PNG chunk');
     const len = buf.readUInt32BE(pos);
+    if (len > buf.length - pos - 12) throw new Error('truncated PNG chunk');
     const type = buf.toString('ascii', pos + 4, pos + 8);
     const data = buf.subarray(pos + 8, pos + 8 + len);
-    if (type === 'IHDR') ihdr = data;
-    else if (type === 'PLTE') plte = data;
-    else if (type === 'tRNS') trns = data;
-    else if (type === 'IDAT') idat.push(data);
-    else if (type === 'IEND') break;
+    if (crc32(buf.subarray(pos + 4, pos + 8 + len)) !== buf.readUInt32BE(pos + 8 + len))
+      throw new Error(`PNG ${type} CRC mismatch`);
+    if (!ihdr && type !== 'IHDR') throw new Error('PNG must start with IHDR');
+    if (type === 'IHDR') {
+      if (ihdr || len !== 13) throw new Error('invalid IHDR chunk');
+      ihdr = data;
+    } else if (type === 'PLTE') {
+      if (plte || idat.length || !len || len > 768 || len % 3) throw new Error('invalid PNG palette');
+      plte = data;
+    } else if (type === 'tRNS') {
+      if (trns || idat.length) throw new Error('invalid PNG transparency');
+      trns = data;
+    } else if (type === 'IDAT') {
+      if (idatEnded) throw new Error('noncontiguous PNG image data');
+      idat.push(data);
+    } else if (type === 'IEND') {
+      if (len || !idat.length || pos + 12 !== buf.length) throw new Error('invalid PNG end');
+      ended = true;
+      break;
+    } else if ((buf[pos + 4] & 0x20) === 0) {
+      throw new Error(`unsupported critical PNG chunk ${type}`);
+    }
+    if (idat.length && type !== 'IDAT') idatEnded = true;
     pos += 12 + len;
   }
-  if (!ihdr || ihdr.length < 13) throw new Error('missing IHDR chunk');
-  if (ihdr[12] !== 0) throw new Error('interlaced PNGs are not supported');
-  if (ihdr[8] !== 8) throw new Error(`only 8-bit PNGs are supported (got ${ihdr[8]})`);
-
-  const width = ihdr.readUInt32BE(0);
-  const height = ihdr.readUInt32BE(4);
-  const colorType = ihdr[9];
+  if (!ihdr || !ended) throw new Error('missing PNG end');
+  if (ihdr[10] !== 0 || ihdr[11] !== 0 || ihdr[12] > 1) throw new Error('unsupported PNG compression, filter or interlace');
+  const width = ihdr.readUInt32BE(0), height = ihdr.readUInt32BE(4);
+  const depth = ihdr[8], colorType = ihdr[9];
   const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colorType];
-  if (!channels) throw new Error(`unsupported PNG colour type ${colorType}`);
-  if (colorType === 3 && !plte) throw new Error('paletted PNG has no PLTE chunk');
-  if (!width || !height) throw new Error('invalid PNG dimensions');
-
+  const depths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+  if (!width || !height || !channels || !depths[colorType].includes(depth)) throw new Error('invalid PNG dimensions or colour type');
+  if (colorType === 3 && (!plte || plte.length / 3 > (1 << depth))) throw new Error('invalid indexed PNG palette');
+  if (trns && ((colorType === 3 && (!plte || trns.length > plte.length / 3)) ||
+    (colorType === 0 && trns.length !== 2) || (colorType === 2 && trns.length !== 6) || [4, 6].includes(colorType)))
+    throw new Error('invalid PNG transparency');
+  const passes = ihdr[12] === 0 ? [[0, 0, 1, 1]] : [
+    [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+    [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2],
+  ];
+  const dimensions = passes.map(([x, y, dx, dy]) => [
+    Math.max(0, Math.ceil((width - x) / dx)), Math.max(0, Math.ceil((height - y) / dy)),
+  ]);
   const raw = inflateSync(Buffer.concat(idat));
-  const stride = width * channels;
-  if (raw.length < (stride + 1) * height) throw new Error('truncated PNG image data');
-
+  const expected = dimensions.reduce((sum, [w, h]) => sum + (w && h ? (Math.ceil(w * channels * depth / 8) + 1) * h : 0), 0);
+  if (raw.length !== expected) throw new Error('invalid PNG image data size');
   const rgba = Buffer.alloc(width * height * 4);
-  const prev = Buffer.alloc(stride);
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)];
-    const line = Buffer.from(raw.subarray(y * (stride + 1) + 1, y * (stride + 1) + 1 + stride));
-    unfilter(filter, line, prev, channels);
-    for (let x = 0; x < width; x++) {
-      const si = x * channels;
-      const di = (y * width + x) * 4;
-      if (colorType === 0) {
-        const v = line[si];
-        rgba[di] = v; rgba[di + 1] = v; rgba[di + 2] = v; rgba[di + 3] = 255;
-      } else if (colorType === 2) {
-        rgba[di] = line[si]; rgba[di + 1] = line[si + 1]; rgba[di + 2] = line[si + 2]; rgba[di + 3] = 255;
-      } else if (colorType === 3) {
-        const index = line[si];
-        const hasPalette = plte && index * 3 + 2 < plte.length;
-        rgba[di] = hasPalette ? plte[index * 3] : 0;
-        rgba[di + 1] = hasPalette ? plte[index * 3 + 1] : 0;
-        rgba[di + 2] = hasPalette ? plte[index * 3 + 2] : 0;
-        rgba[di + 3] = (trns && index < trns.length) ? trns[index] : 255;
-      } else if (colorType === 4) {
-        const g = line[si];
-        rgba[di] = g; rgba[di + 1] = g; rgba[di + 2] = g; rgba[di + 3] = line[si + 1];
-      } else {
-        rgba[di] = line[si]; rgba[di + 1] = line[si + 1]; rgba[di + 2] = line[si + 2]; rgba[di + 3] = line[si + 3];
+  const scale = (v) => depth === 16 ? Math.round(v / 257) : depth < 8 ? Math.round(v * 255 / ((1 << depth) - 1)) : v;
+  let offset = 0;
+  for (let pass = 0; pass < passes.length; pass++) {
+    const [x0, y0, dx, dy] = passes[pass], [w, h] = dimensions[pass];
+    if (!w || !h) continue;
+    const stride = Math.ceil(w * channels * depth / 8), prev = Buffer.alloc(stride);
+    for (let y = 0; y < h; y++) {
+      const filter = raw[offset++], line = Buffer.from(raw.subarray(offset, offset + stride));
+      offset += stride;
+      unfilter(filter, line, prev, Math.max(1, Math.ceil(channels * depth / 8)));
+      const sample = (index) => depth === 16 ? line.readUInt16BE(index * 2) : depth === 8 ? line[index]
+        : (line[Math.floor(index * depth / 8)] >> (8 - depth - (index * depth % 8))) & ((1 << depth) - 1);
+      for (let x = 0; x < w; x++) {
+        const si = x * channels, di = ((y0 + y * dy) * width + x0 + x * dx) * 4;
+        if (colorType === 0) {
+          const v = sample(si), g = scale(v);
+          rgba[di] = g; rgba[di + 1] = g; rgba[di + 2] = g;
+          rgba[di + 3] = trns && trns.readUInt16BE(0) === v ? 0 : 255;
+        } else if (colorType === 2) {
+          const r = sample(si), g = sample(si + 1), b = sample(si + 2);
+          rgba[di] = scale(r); rgba[di + 1] = scale(g); rgba[di + 2] = scale(b);
+          rgba[di + 3] = trns && trns.readUInt16BE(0) === r && trns.readUInt16BE(2) === g && trns.readUInt16BE(4) === b ? 0 : 255;
+        } else if (colorType === 3) {
+          const index = sample(si);
+          if (index * 3 + 2 >= plte.length) throw new Error('PNG palette index out of range');
+          rgba[di] = plte[index * 3]; rgba[di + 1] = plte[index * 3 + 1]; rgba[di + 2] = plte[index * 3 + 2];
+          rgba[di + 3] = trns && index < trns.length ? trns[index] : 255;
+        } else if (colorType === 4) {
+          const g = scale(sample(si));
+          rgba[di] = g; rgba[di + 1] = g; rgba[di + 2] = g; rgba[di + 3] = scale(sample(si + 1));
+        } else {
+          rgba[di] = scale(sample(si)); rgba[di + 1] = scale(sample(si + 1));
+          rgba[di + 2] = scale(sample(si + 2)); rgba[di + 3] = scale(sample(si + 3));
+        }
       }
+      line.copy(prev);
     }
-    line.copy(prev);
   }
   return { width, height, rgba };
 }
@@ -491,43 +522,61 @@ export async function verifyIcons(outDir, { logoPath = DEFAULT_LOGO, tolerance =
 // APK inspection (the icons actually packaged into the built APK)
 // ---------------------------------------------------------------------------
 
-/** Minimal ZIP reader for APK inspection (stored + deflate entries). */
+/** ZIP reader for APK inspection: validates metadata and CRC of every entry read. */
 export function readZipEntries(buffer) {
   let eocd = -1;
-  for (let i = buffer.length - 22; i >= 0; i--) {
-    if (buffer.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 22 - 0xffff); i--) {
+    if (buffer.readUInt32LE(i) === 0x06054b50 && i + 22 + buffer.readUInt16LE(i + 20) === buffer.length) { eocd = i; break; }
   }
   if (eocd < 0) throw new Error('not a ZIP/APK file (no end-of-central-directory record)');
-
+  if (buffer.readUInt16LE(eocd + 4) || buffer.readUInt16LE(eocd + 6) ||
+      buffer.readUInt16LE(eocd + 8) !== buffer.readUInt16LE(eocd + 10)) throw new Error('unsupported multi-disk ZIP');
   const count = buffer.readUInt16LE(eocd + 10);
+  const centralSize = buffer.readUInt32LE(eocd + 12);
   let offset = buffer.readUInt32LE(eocd + 16);
+  const centralStart = offset, centralEnd = offset + centralSize;
+  if (count === 0xffff || offset === 0xffffffff || centralSize === 0xffffffff || centralEnd > eocd)
+    throw new Error('unsupported or corrupt ZIP central directory');
   const entries = new Map();
-
   for (let k = 0; k < count; k++) {
-    if (buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error('corrupt ZIP central directory');
-    const method = buffer.readUInt16LE(offset + 10);
-    const compressedSize = buffer.readUInt32LE(offset + 20);
-    const nameLength = buffer.readUInt16LE(offset + 28);
-    const extraLength = buffer.readUInt16LE(offset + 30);
-    const commentLength = buffer.readUInt16LE(offset + 32);
+    if (offset + 46 > centralEnd || buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error('corrupt ZIP central directory');
+    const flags = buffer.readUInt16LE(offset + 8), method = buffer.readUInt16LE(offset + 10);
+    const crc = buffer.readUInt32LE(offset + 16), compressedSize = buffer.readUInt32LE(offset + 20);
+    const size = buffer.readUInt32LE(offset + 24), nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30), commentLength = buffer.readUInt16LE(offset + 32);
     const localOffset = buffer.readUInt32LE(offset + 42);
-    const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLength);
-    entries.set(name, { method, compressedSize, localOffset });
+    if (offset + 46 + nameLength + extraLength + commentLength > centralEnd) throw new Error('truncated ZIP central directory');
+    if (flags & 1) throw new Error('encrypted ZIP entries are unsupported');
+    if (![0, 8].includes(method)) throw new Error(`unsupported ZIP compression method ${method}`);
+    if (size === 0xffffffff || compressedSize === 0xffffffff || localOffset === 0xffffffff) throw new Error('ZIP64 is unsupported');
+    const nameBytes = buffer.subarray(offset + 46, offset + 46 + nameLength);
+    const name = nameBytes.toString('utf8');
+    if (!name || entries.has(name)) throw new Error(`duplicate or empty ZIP entry ${name}`);
+    entries.set(name, { flags, method, crc, compressedSize, size, localOffset, nameBytes });
     offset += 46 + nameLength + extraLength + commentLength;
   }
-
+  if (offset !== centralEnd) throw new Error('invalid ZIP central directory size');
   const read = (name) => {
     const entry = entries.get(name);
     if (!entry) return null;
-    const { method, compressedSize, localOffset } = entry;
-    if (buffer.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`corrupt local header for ${name}`);
-    const nameLength = buffer.readUInt16LE(localOffset + 26);
-    const extraLength = buffer.readUInt16LE(localOffset + 28);
+    const { flags, method, crc, compressedSize, size, localOffset, nameBytes } = entry;
+    if (localOffset + 30 > centralStart || buffer.readUInt32LE(localOffset) !== 0x04034b50)
+      throw new Error(`corrupt local header for ${name}`);
+    const localFlags = buffer.readUInt16LE(localOffset + 6), localMethod = buffer.readUInt16LE(localOffset + 8);
+    const nameLength = buffer.readUInt16LE(localOffset + 26), extraLength = buffer.readUInt16LE(localOffset + 28);
     const start = localOffset + 30 + nameLength + extraLength;
+    if (localFlags !== flags || localMethod !== method || start + compressedSize > centralStart ||
+        !buffer.subarray(localOffset + 30, localOffset + 30 + nameLength).equals(nameBytes))
+      throw new Error(`invalid local header for ${name}`);
+    if (!(flags & 8) && (buffer.readUInt32LE(localOffset + 14) !== crc ||
+        buffer.readUInt32LE(localOffset + 18) !== compressedSize || buffer.readUInt32LE(localOffset + 22) !== size))
+      throw new Error(`inconsistent ZIP metadata for ${name}`);
+    if (size > 256 * 1024 * 1024) throw new Error(`ZIP entry too large: ${name}`);
     const payload = buffer.subarray(start, start + compressedSize);
-    return method === 0 ? Buffer.from(payload) : inflateRawSync(payload);
+    const data = method === 0 ? Buffer.from(payload) : inflateRawSync(payload, { maxOutputLength: size + 1 });
+    if (data.length !== size || crc32(data) !== crc) throw new Error(`ZIP CRC or size mismatch for ${name}`);
+    return data;
   };
-
   return { entries, read };
 }
 
@@ -625,7 +674,7 @@ function adaptiveReferences(buf) {
       if (!stack.length) {
         if (rootSeen || rootClosed || name !== 'adaptive-icon') throw new Error('not an adaptive-icon root');
         rootSeen = true;
-      } else if (stack.length !== 1 || !['background', 'foreground'].includes(name) || Object.hasOwn(references, name)) {
+      } else if (stack.length !== 1 || !['background', 'foreground', 'monochrome'].includes(name) || Object.hasOwn(references, name)) {
         throw new Error('unexpected or duplicate adaptive-icon layer');
       }
       let drawable;
@@ -666,6 +715,90 @@ function adaptiveReferences(buf) {
   return references;
 }
 
+/** Read application and launcher activity icon IDs from the compiled manifest. */
+function manifestIcons(buf) {
+  const chunks = androidChildren(buf, androidRoot(buf, 3));
+  const pools = chunks.filter((c) => c.type === 1), maps = chunks.filter((c) => c.type === 0x0180);
+  if (pools.length !== 1 || maps.length !== 1 || (maps[0].size - maps[0].header) % 4)
+    throw new Error('invalid manifest strings or resource map');
+  const strings = androidStrings(buf, pools[0]), map = maps[0];
+  const get = (i) => {
+    if (i === 0xffffffff) return null;
+    if (i >= strings.length) throw new Error('invalid manifest string index');
+    return strings[i];
+  };
+  const stack = [];
+  let app, root, currentActivity, currentFilter, launchers = 0;
+  for (const c of chunks) {
+    if (c.type === 0x0102) {
+      if (c.header < 16 || c.size < c.header + 20) throw new Error('truncated manifest element');
+      const ext = c.start + c.header, ns = get(buf.readUInt32LE(ext)), name = get(buf.readUInt32LE(ext + 4));
+      const attrStart = buf.readUInt16LE(ext + 8), attrSize = buf.readUInt16LE(ext + 10), count = buf.readUInt16LE(ext + 12);
+      if (ns !== null || !name || attrStart < 20 || attrSize < 20 || ext + attrStart + count * attrSize > c.end)
+        throw new Error('invalid manifest element');
+      const attrs = new Map();
+      for (let i = 0; i < count; i++) {
+        const a = ext + attrStart + i * attrSize, attrNs = get(buf.readUInt32LE(a));
+        const index = buf.readUInt32LE(a + 4); get(index); get(buf.readUInt32LE(a + 8));
+        if (buf.readUInt16LE(a + 12) !== 8 || buf[a + 14] !== 0) throw new Error('invalid manifest value');
+        if (attrNs === 'http://schemas.android.com/apk/res/android') {
+          if (index >= (map.size - map.header) / 4) throw new Error('invalid manifest attribute ID');
+          const id = buf.readUInt32LE(map.start + map.header + index * 4);
+          if (attrs.has(id)) throw new Error('duplicate manifest attribute');
+          attrs.set(id, { type: buf[a + 15], value: buf.readUInt32LE(a + 16) });
+        }
+      }
+      const parent = stack.at(-1);
+      if (!stack.length) {
+        if (root || name !== 'manifest') throw new Error('invalid manifest root');
+        root = true;
+      } else if (parent === 'manifest' && name === 'application') {
+        if (app) throw new Error('duplicate manifest application');
+        const ref = (id) => {
+          const v = attrs.get(id);
+          if (!v || v.type !== 1 || !v.value) throw new Error('missing manifest launcher icon reference');
+          return v.value;
+        };
+        app = { icon: ref(0x01010002), roundIcon: ref(0x0101052c) };
+      } else if (parent === 'application' && (name === 'activity' || name === 'activity-alias')) {
+        if (!app) throw new Error('manifest application missing');
+        currentActivity = { icon: attrs.get(0x01010002), roundIcon: attrs.get(0x0101052c), launcher: false };
+      } else if (currentActivity && (parent === 'activity' || parent === 'activity-alias')) {
+        if (name === 'intent-filter') currentFilter = { main: false, launcher: false };
+      } else if (currentFilter && parent === 'intent-filter' && (name === 'action' || name === 'category')) {
+        const value = attrs.get(0x01010003);
+        if (value && value.type === 3) {
+          const v = get(value.value);
+          if (name === 'action' && v === 'android.intent.action.MAIN') currentFilter.main = true;
+          if (name === 'category' && v === 'android.intent.category.LAUNCHER') currentFilter.launcher = true;
+        }
+      }
+      stack.push(name);
+    } else if (c.type === 0x0103) {
+      if (c.header < 16 || c.size < c.header + 8) throw new Error('truncated manifest end');
+      const ext = c.start + c.header, ns = get(buf.readUInt32LE(ext)), name = get(buf.readUInt32LE(ext + 4));
+      if (ns !== null || stack.pop() !== name) throw new Error('unbalanced manifest');
+      if (name === 'intent-filter' && currentFilter) {
+        if (currentFilter.main && currentFilter.launcher) currentActivity.launcher = true;
+        currentFilter = null;
+      }
+      if ((name === 'activity' || name === 'activity-alias') && currentActivity) {
+        if (currentActivity.launcher) {
+          launchers++;
+          for (const key of ['icon', 'roundIcon']) {
+            const override = currentActivity[key];
+            if (override && (override.type !== 1 || override.value !== app[key]))
+              throw new Error(`launcher activity overrides ${key}`);
+          }
+        }
+        currentActivity = null;
+      }
+    } else if (![1, 0x0180, 0x0100, 0x0101].includes(c.type)) throw new Error('unsupported manifest XML chunk');
+  }
+  if (!root || stack.length || !app || !launchers) throw new Error('incomplete manifest launcher');
+  return app;
+}
+
 /** Resolve a resource ID through resources.arsc to its type, name and file paths. */
 function resolveDrawable(buf, id) {
   const root = androidRoot(buf, 2);
@@ -683,12 +816,17 @@ function resolveDrawable(buf, id) {
   const types = androidStrings(buf, androidChunk(buf, pkg.start + buf.readUInt32LE(pkg.start + 268), pkg.end));
   const keys = androidStrings(buf, androidChunk(buf, pkg.start + buf.readUInt32LE(pkg.start + 276), pkg.end));
   const files = new Set();
+  const configurations = [];
   let key;
   for (const c of androidChildren(buf, pkg)) {
     if (c.type !== 0x0201) continue;
     if (c.header < 24) throw new Error('invalid resource type header');
     const localType = buf[c.start + 8];
     if (localType + typeOffset !== typeId) continue;
+    const configSize = buf.readUInt32LE(c.start + 20);
+    if (configSize < 28 || configSize > c.header - 20) throw new Error('invalid resource configuration size');
+    const config = buf.subarray(c.start + 20, c.start + 20 + configSize);
+    const density = config.readUInt16LE(14), sdk = config.readUInt16LE(24);
     const flags = buf[c.start + 9];
     const count = buf.readUInt32LE(c.start + 12);
     const entriesStart = buf.readUInt32LE(c.start + 16);
@@ -721,11 +859,28 @@ function resolveDrawable(buf, id) {
       throw new Error('drawable resource is not a file');
     if (key !== undefined && key !== keys[keyIndex]) throw new Error('inconsistent resource name');
     key = keys[keyIndex];
+    // Until all Android qualifier precedence is modeled, fail closed on qualifiers
+    // other than density and SDK rather than accepting night-only (etc.) resources.
+    for (let i = 4; i < config.length; i++) {
+      if (![14, 15, 24, 25].includes(i) && config[i] !== 0) throw new Error('unsupported resource configuration qualifier');
+    }
     files.add(values[valueIndex]);
+    configurations.push({ file: values[valueIndex], density, sdk });
   }
   const typeName = types[typeId - typeOffset - 1];
   if (!key || !typeName || !files.size) throw new Error('unresolved drawable resource');
-  return { type: typeName, name: key, files };
+  return { type: typeName, name: key, files, configurations };
+}
+
+// PNG encoders may discard RGB under fully transparent pixels; compare visible pixels.
+function sameVisiblePixels(actual, expected) {
+  if (actual.width !== expected.width || actual.height !== expected.height) return false;
+  for (let i = 0; i < actual.rgba.length; i += 4) {
+    if (actual.rgba[i + 3] !== expected.rgba[i + 3] ||
+        (expected.rgba[i + 3] !== 0 && (actual.rgba[i] !== expected.rgba[i] ||
+         actual.rgba[i + 1] !== expected.rgba[i + 1] || actual.rgba[i + 2] !== expected.rgba[i + 2]))) return false;
+  }
+  return true;
 }
 
 /**
@@ -743,6 +898,8 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
   let zip;
   try {
     zip = readZipEntries(buffer);
+    // Validate the whole archive, not only entries used by the icon verifier.
+    for (const name of zip.entries.keys()) zip.read(name);
   } catch (error) {
     return { problems: [`${apkPath}: ${error.message}`], matches };
   }
@@ -772,13 +929,36 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
     if (/^(?:mipmap|drawable)-(?:mdpi|hdpi|xhdpi|xxhdpi|xxxhdpi)\//.test(relative)) {
       candidates.push(`res/${relative.replace('/', '-v4/')}`);
     }
-    for (const suffix of candidates) {
-      for (const name of zip.entries.keys()) {
-        if (name === suffix || name.endsWith(`/${suffix}`)) return name;
+    return candidates.find((name) => zip.entries.has(name)) ?? null;
+  };
+
+  try {
+    const manifest = zip.read('AndroidManifest.xml');
+    const table = zip.read('resources.arsc');
+    if (!manifest || !table) throw new Error('missing AndroidManifest.xml or resources.arsc');
+    const icons = manifestIcons(manifest);
+    for (const [attribute, file] of [['icon', 'ic_launcher'], ['roundIcon', 'ic_launcher_round']]) {
+      const resource = resolveDrawable(table, icons[attribute]);
+      if (resource.type !== 'mipmap' || resource.name !== file) throw new Error(`${attribute} references the wrong launcher resource`);
+      const verified = new Map();
+      for (const density of DENSITIES) {
+        const entry = findEntry(`mipmap-${density.name}/${file}.png`);
+        if (!entry || !resource.configurations.some((c) => c.file === entry && c.density === density.scale * 160 && c.sdk <= 23))
+          throw new Error(`${attribute} does not resolve to ${density.name} launcher`);
+        verified.set(entry, density.scale * 160);
+      }
+      const adaptive = findEntry(`mipmap-anydpi-v26/${file}.xml`);
+      if (!adaptive || !resource.configurations.some((c) => c.file === adaptive && c.density === 0xfffe && c.sdk === 26))
+        throw new Error(`${attribute} does not resolve to adaptive icon`);
+      verified.set(adaptive, 0xfffe);
+      for (const config of resource.configurations) {
+        if (verified.get(config.file) !== config.density || (config.file === adaptive && config.sdk < 26))
+          throw new Error(`${attribute} has an unverified launcher configuration: ${config.file}`);
       }
     }
-    return null;
-  };
+  } catch (error) {
+    problems.push(`APK launcher references are invalid (${error.message})`);
+  }
 
   for (const relative of REQUIRED_FILES) {
     const name = findEntry(relative);
@@ -807,16 +987,52 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
           const resource = resolveDrawable(table, refs[layer]);
           if (resource.type !== 'drawable' || resource.name !== `ic_launcher_${layer}`)
             throw new Error(`${layer} references the wrong drawable`);
-          const verifiedFiles = new Set();
+          const verifiedFiles = new Map();
           for (const density of DENSITIES) {
             const entry = findEntry(`drawable-${density.name}/ic_launcher_${layer}.png`);
-            if (!entry || !resource.files.has(entry)) throw new Error(`${layer} does not resolve to ${density.name} drawable`);
-            verifiedFiles.add(entry);
+            if (!entry || !resource.configurations.some((config) => config.file === entry &&
+                config.density === density.scale * 160 && config.sdk <= 26))
+              throw new Error(`${layer} does not resolve to ${density.name} drawable`);
+            verifiedFiles.set(entry, density.scale * 160);
           }
           // Another configuration may be selected instead of these PNGs by Android.
           // It cannot be treated as verified just because the five PNGs also exist.
-          for (const file of resource.files) {
-            if (!verifiedFiles.has(file)) throw new Error(`${layer} has an unverified drawable configuration: ${file}`);
+          for (const config of resource.configurations) {
+            if (verifiedFiles.has(config.file)) {
+              if (verifiedFiles.get(config.file) !== config.density) throw new Error(`${layer} has incorrect density for ${config.file}`);
+              continue;
+            }
+            const density = DENSITIES.find((d) => d.scale * 160 === (config.density || 160));
+            const suffix = `${config.density ? `-${density?.name}` : ''}${config.sdk ? `-v${config.sdk}` : ''}`;
+            const expectedPath = `res/drawable${suffix}/ic_launcher_${layer}.png`;
+            if (!density || config.file !== expectedPath || !zip.entries.has(config.file))
+              throw new Error(`${layer} has an unverified drawable configuration: ${config.file}`);
+            const alternative = decodePng(zip.read(config.file));
+            const target = decodePng(generated.get(`drawable-${density.name}/ic_launcher_${layer}.png`));
+            if (!sameVisiblePixels(alternative, target)) throw new Error(`${layer} alternative pixels differ from the generated icon: ${config.file}`);
+            verifiedFiles.set(config.file, config.density);
+          }
+        }
+        if (refs.monochrome) {
+          const resource = resolveDrawable(table, refs.monochrome);
+          if (resource.type !== 'drawable') throw new Error('monochrome references the wrong resource type');
+          const verified = new Map();
+          for (const density of DENSITIES) {
+            const relative = `drawable-${density.name}/${resource.name}.png`;
+            const entry = findEntry(relative);
+            if (!entry || !resource.configurations.some((c) => c.file === entry && c.density === density.scale * 160 && c.sdk <= 33))
+              throw new Error(`monochrome does not resolve to ${density.name} drawable`);
+            const image = decodePng(zip.read(entry));
+            const expectedImage = decodePng(generated.get(`drawable-${density.name}/ic_launcher_foreground.png`));
+            if (image.width !== expectedImage.width || image.height !== expectedImage.height)
+              throw new Error('monochrome drawable has incorrect dimensions');
+            for (let i = 3; i < image.rgba.length; i += 4) {
+              if (image.rgba[i] !== expectedImage.rgba[i]) throw new Error('monochrome drawable has incorrect mask');
+            }
+            verified.set(entry, density.scale * 160);
+          }
+          for (const config of resource.configurations) {
+            if (verified.get(config.file) !== config.density) throw new Error(`unverified monochrome configuration: ${config.file}`);
           }
         }
       } catch (error) {
@@ -843,7 +1059,9 @@ export async function verifyApkIcons(apkPath, { logoPath = DEFAULT_LOGO, toleran
       const corner = (image.rgba[3] ?? 0);
       if (corner > 8) problems.push(`APK res/${relative} has opaque corners (not round)`);
     }
-    if (generated.has(relative) && Buffer.compare(data, generated.get(relative)) === 0) matches.push(relative);
+    const target = decodePng(generated.get(relative));
+    if (!sameVisiblePixels(image, target)) problems.push(`APK res/${relative} pixels differ from the generated icon`);
+    if (Buffer.compare(data, generated.get(relative)) === 0) matches.push(relative);
   }
 
   return { problems, matches };
