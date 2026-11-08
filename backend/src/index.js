@@ -301,20 +301,20 @@ export default {
           },
           ...body.messages
         ],
-        max_tokens: 700
+        max_tokens: 700,
+        chat_template_kwargs: { enable_thinking: false }
       });
 
-      const reply = result?.response;
+      // GLM uses the chat-completions shape; retain support for older models.
+      const reply = result?.choices?.[0]?.message?.content ?? result?.response;
       if (typeof reply !== "string" || !reply.trim()) {
         return json({ error: "The AI returned an empty response." }, 502, origin);
       }
 
       return json({ reply }, 200, origin);
-    } catch (error) {
-      console.error("Workers AI request failed:", {
-        name: error?.name || "UnknownError",
-        message: String(error?.message || "No error message").slice(0, 500)
-      });
+    } catch {
+      // Provider errors may contain request data; do not log their contents.
+      console.error("Workers AI request failed.");
 
       return json({
         error: "The AI service is temporarily unavailable. Please try again later."
