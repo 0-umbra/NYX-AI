@@ -5,27 +5,11 @@ on:
   workflow_dispatch:
   push:
     branches: [develop]
-  # Temporary PR #6 diagnostic: remove this trigger, pin/assertion and reporting wrapper before merge.
-  pull_request:
-    types: [synchronize]
-    branches: [develop]
 jobs:
   apk:
-    # GitHub cannot filter pull_request triggers by number; skip all other PRs.
-    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.number == 6 && github.head_ref == 'arena/b5cf563a-nyx-ai' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      - name: Assert diagnostic commit
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          actual="$(git rev-parse HEAD)"
-          echo "Diagnostic checkout: $actual"
-          test "$actual" = "$EXPECTED_HEAD"
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-java@v4
@@ -42,38 +26,8 @@ jobs:
       # the resources from resources/.
       - run: node scripts/android-icons.mjs
       - run: cd android && ./gradlew assembleDebug
-      # Temporary investigation: inspect compiled resource configurations.
-      - name: Report packaged launcher configurations
-        run: |
-          aapt2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)"
-          "$aapt2" dump resources android/app/build/outputs/apk/debug/app-debug.apk > "$RUNNER_TEMP/nyx-resources.txt"
-          awk '/resource 0x/ { show = / (drawable|mipmap)\/ic_launcher(_round|_foreground|_background)?([[:space:]]|$)/ } show { print }' "$RUNNER_TEMP/nyx-resources.txt" > "$RUNNER_TEMP/nyx-launcher-configs.txt"
-          cat "$RUNNER_TEMP/nyx-launcher-configs.txt"
-          output="$(cat "$RUNNER_TEMP/nyx-launcher-configs.txt")"
-          if [ -z "$output" ]; then output='No launcher configurations found in dump'; fi
-          output="${output//'%'/'%25'}"; output="${output//$'\r'/'%0D'}"; output="${output//$'\n'/'%0A'}"
-          printf '::notice title=Packaged launcher configurations::%s\n' "$output"
-      - name: Report APK SHA-256 and size
-        run: |
-          apk=android/app/build/outputs/apk/debug/app-debug.apk
-          sha="$(sha256sum "$apk" | cut -d ' ' -f 1)"
-          size="$(stat --printf='%s' "$apk")"
-          printf 'APK SHA-256: %s\nAPK size: %s bytes\n' "$sha" "$size"
-          printf '::notice title=APK SHA-256 and size::%s %s bytes\n' "$sha" "$size"
-      # Preserve the verifier's exit status; the annotation makes its complete output accessible.
-      - name: Verify packaged APK
-        run: |
-          set +e
-          node scripts/android-icons.mjs --check-apk android/app/build/outputs/apk/debug/app-debug.apk 2>&1 | tee "$RUNNER_TEMP/nyx-apk-verifier.log"
-          statuses=("${PIPESTATUS[@]}")
-          set -e
-          if [ "${statuses[1]}" -ne 0 ]; then exit "${statuses[1]}"; fi
-          output="$(cat "$RUNNER_TEMP/nyx-apk-verifier.log")"
-          output="${output//'%'/'%25'}"
-          output="${output//$'\r'/'%0D'}"
-          output="${output//$'\n'/'%0A'}"
-          printf '::notice title=APK verifier output::%s\n' "$output"
-          exit "${statuses[0]}"
+      # Confirm the icon really is inside the packaged APK, not just in the source tree.
+      - run: node scripts/android-icons.mjs --check-apk android/app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
         if: always()
         with:
