@@ -347,3 +347,50 @@ test("valid authenticated free chat returns the AI response", async () => {
   const data = await response.json();
   assert.equal(data.reply, "Hello! I am NYX AI.");
 });
+
+test("GLM chat-completion content is returned with thinking disabled", async () => {
+  let call;
+  const response = await worker.fetch(
+    makeRequest("/chat", {
+      method: "POST",
+      body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] })
+    }),
+    makeEnv({ AI: { run: async (model, inputs) => {
+      call = { model, inputs };
+      return { choices: [{ message: { role: "assistant", content: "GLM answer", reasoning_content: "private reasoning" }, finish_reason: "stop" }] };
+    } } })
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { reply: "GLM answer" });
+  assert.equal(call.model, "@cf/zai-org/glm-4.7-flash");
+  assert.equal(call.inputs.max_tokens, 700);
+  assert.deepEqual(call.inputs.chat_template_kwargs, { enable_thinking: false });
+});
+
+test("empty GLM content never exposes reasoning and returns 502", async () => {
+  const response = await worker.fetch(
+    makeRequest("/chat", { method: "POST", body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] }) }),
+    makeEnv({ AI: { run: async () => ({ choices: [{ message: { content: null, reasoning_content: "private reasoning" }, finish_reason: "length" }] }) } })
+  );
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: "The AI returned an empty response." });
+});
+
+test("provider failures return a sanitized 503", async () => {
+  const response = await worker.fetch(
+    makeRequest("/chat", { method: "POST", body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] }) }),
+    makeEnv({ AI: { run: async () => { throw new Error("sensitive provider detail"); } } })
+  );
+  assert.equal(response.status, 503);
+  assert.doesNotMatch(await response.text(), /sensitive provider detail/);
+});
+
+test("max tier remains unavailable without invoking AI", async () => {
+  let called = false;
+  const response = await worker.fetch(
+    makeRequest("/chat", { method: "POST", body: JSON.stringify({ model: "max", messages: [{ role: "user", content: "Hello" }] }) }),
+    makeEnv({ AI: { run: async () => { called = true; } } })
+  );
+  assert.equal(response.status, 403);
+  assert.equal(called, false);
+});
