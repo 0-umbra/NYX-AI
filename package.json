@@ -13,6 +13,7 @@
     "start": "node scripts/dev-server.js",
     "build": "node scripts/build.js",
     "test": "node scripts/run-tests.js",
+    "icons:android": "node scripts/android-icons.mjs",
     "test:e2e": "node --test tests/e2e/ui.test.mjs",
     "cap:add:android": "npm run build && cap add android",
     "cap:sync": "npm run build && cap sync android",

@@ -7,11 +7,15 @@ Cloudflare Worker was **not deployed** (dry run only) and the optional Playwrigh
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Frontend unit + static checks | `npm test` | **62 / 62 passed**, 0 failed (~11.6 s) |
+| Frontend unit + static checks | `npm test` | **79 / 79 passed**, 0 failed (~21 s) |
+| Android launcher icon | `node scripts/android-icons.mjs` | **22 files generated and verified** (exit 0) |
+| Android launcher icon regressions | `node --test tests/unit/android-icons.test.js` | **11 / 11 passed** |
+| App boot / session-flow regressions | `node --test tests/unit/app-boot.test.js` | **6 / 6 passed** |
 | Conversation-context regressions | `node --test tests/unit/context.test.js` | **17 / 17 passed** |
-| Backend (Worker) tests | `cd backend && npm test` | **28 / 28 passed** (~0.4 s) |
+| Backend (Worker) tests | `cd backend && npm test` | **29 / 29 passed** (~0.4 s) |
 | Production build | `npm run build` | Built `www/` (index.html, manifest, bundled `app.bundle.js`, logo and icons) |
-| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled, 10.94 KiB upload / 3.72 KiB gzip; bindings `env.AI`, `env.CHAT_LIMITER` |
+| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled, 10.93 KiB upload / 3.74 KiB gzip; bindings `env.AI`, `env.CHAT_LIMITER` |
+| Android build | `.github/workflows/android-debug.yml` | Not run (no Android SDK / Gradle / Java in this environment) |
 | Browser end-to-end | `npm run test:e2e` | Not run (Playwright/Chromium are not installed here) |
 
 Conversation-context cases covered: related follow-up, pronoun follow-up ("he", "that character"),
@@ -22,9 +26,48 @@ conversation restored after a reload, and the Worker forwarding + validating his
 dropped, blank turns ignored, client `system` messages rejected, 24-message cap, oversized history
 trimmed from the oldest turn, oversized body rejected).
 
+`tests/unit/app-boot.test.js` bundles the real `src/js/app.js` with Firebase stubbed and drives it in
+jsdom through boot, sign-in, a message, a follow-up, a reload, a new chat and sign-out. It asserts that
+no `error` / `unhandledRejection` is raised, that the generic "Something went wrong. Please try again."
+toast is never shown, and that a failure inside `send()` before the transport is reported as a
+conversation notice. The negative control was checked: removing the `try/catch` in `send()` makes that
+test fail.
+
 Not verified here: a live call to the deployed Worker and Workers AI with a real Firebase session
 (no credentials or network access in this environment). The FREE model id, authentication, origin
 checks, UID rate limiting and progressive reveal are unchanged.
+
+---
+
+## Android launcher icon (current branch)
+
+`scripts/android-icons.mjs` derives the launcher icon from the official logo
+(`src/assets/logo/nyx-mark.png`, 512 x 512) and writes it to `android/app/src/main/res`. It uses only
+Node built-ins, and it verifies what it wrote:
+
+- **22 files**: `mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png` + `ic_launcher_round.png`
+  (48/72/96/144/192), `drawable-<density>/ic_launcher_foreground.png` + `ic_launcher_background.png`
+  (108/162/216/324/432), `mipmap-anydpi-v26/ic_launcher.xml` + `ic_launcher_round.xml`.
+- **Verified per file**: exists, is a valid PNG (round-tripped through the script's own decoder), is the
+  exact required size, square icons carry the NYX AI mark (centre opaque, ≥ 4 distinct colours, average
+  colour within tolerance of the source logo, high-frequency detail present), round icons have
+  transparent corners, foregrounds have transparent corners + opaque centre, backgrounds are uniform, and
+  the adaptive XML declares `<adaptive-icon>` with resolvable `@drawable` references.
+- **Determinism**: running it twice produces byte-identical files.
+- **Failure modes reproduced**: missing file → exit 1 with 22 "missing …" problems; corrupt PNG → "not a
+  PNG file"; wrong dimensions → "expected 192x192, found 10x10"; wrong XML shape → 3 problems; empty tree
+  → 22 problems; `--check-apk` on an APK with no icons → 22 problems.
+- **APK inspection**: `--check-apk` reads a ZIP (stored + deflate), maps `res/mipmap-*/…` and
+  `res/drawable-*/…` to the expected files and confirms the bytes are identical.
+- **Visual check**: the generated square icons are full-bleed dark-navy with the logo; the round icons keep
+  the logo centred with transparent corners; the adaptive foreground is the logo at 66 % centred with
+  transparent margins.
+
+`.github/workflows/android-debug.yml` runs the generator after `npx cap sync android` and the verifier
+against `app-debug.apk` after `./gradlew assembleDebug`, so a broken launcher icon fails the workflow.
+
+Not verified here: a real Android build (no Android SDK / Gradle / Java in this environment), so the
+workflow itself was reviewed but not executed end to end.
 
 ---
 

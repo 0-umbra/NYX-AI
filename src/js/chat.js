@@ -177,30 +177,44 @@ export function initChat({ store, getModelId, storage = null }) {
   }
 
   async function send() {
-    const text = els.input.value.trim();
-    if (generating() || (!text && attachments.length === 0)) return;
-    if (!isModelAvailable(getModelId())) { toast('This model tier is not available yet.'); return; }
-    let conv = activeId ? store.get(activeId) : null;
-    if (!conv) { conv = store.create(getModelId()); setActive(conv.id); }
-    const files = attachments;
-    append(store.addMessage(conv.id, { role: 'user', content: text, attachments: files }));
-    attachments = [];
-    els.input.value = '';
-    renderAttachments();
-    autosize();
+    // Everything before the transport runs outside runTransport's own try/catch, and send() is
+    // called without await from the submit handler. An unexpected throw there would escape as an
+    // unhandled rejection and surface as the generic "Something went wrong" toast with no context,
+    // so failures are reported in the conversation instead.
+    let conv = null;
+    try {
+      const text = els.input.value.trim();
+      if (generating() || (!text && attachments.length === 0)) return;
+      if (!isModelAvailable(getModelId())) { toast('This model tier is not available yet.'); return; }
+      conv = activeId ? store.get(activeId) : null;
+      if (!conv) { conv = store.create(getModelId()); setActive(conv.id); }
+      const files = attachments;
+      const userMessage = store.addMessage(conv.id, { role: 'user', content: text, attachments: files });
+      if (!userMessage) throw new Error('The conversation is no longer available.');
+      append(userMessage);
+      attachments = [];
+      els.input.value = '';
+      renderAttachments();
+      autosize();
 
-    // Attachments are saved locally only, so a message without text has nothing to ask the model.
-    // Sending it would put an empty turn in the conversation that the backend has to reject.
-    if (!text) {
-      append(store.addMessage(conv.id, { role: 'system', kind: 'attachment-only', content: '**Attachments are stored on this device only.** Add a message describing what you need from them.' }));
-      return;
-    }
+      // Attachments are saved locally only, so a message without text has nothing to ask the model.
+      // Sending it would put an empty turn in the conversation that the backend has to reject.
+      if (!text) {
+        append(store.addMessage(conv.id, { role: 'system', kind: 'attachment-only', content: '**Attachments are stored on this device only.** Add a message describing what you need from them.' }));
+        return;
+      }
 
-    if (!transport) {
-      append(store.addMessage(conv.id, { role: 'system', kind: 'backend-offline', content: 'Chat is temporarily unavailable. Please try again later.' }));
-      return;
+      if (!transport) {
+        append(store.addMessage(conv.id, { role: 'system', kind: 'backend-offline', content: 'Chat is temporarily unavailable. Please try again later.' }));
+        return;
+      }
+      await runTransport(conv);
+    } catch (err) {
+      console.error('[NYX] message could not be sent', err);
+      if (conv && store.get(conv.id)) {
+        append(store.addMessage(conv.id, { role: 'system', kind: 'error', content: 'The message could not be sent. Please try again.' }));
+      }
     }
-    await runTransport(conv);
   }
 
   // Events ----------------------------------------------------------------

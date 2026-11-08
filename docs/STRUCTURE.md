@@ -41,9 +41,11 @@ NYX-AI/
 │   ├── dev-server.js           65   Zero-dependency dev server (serves only index.html, manifest, src/)
 │   ├── build.js                13   Copies the app into www/
 │   ├── run-tests.js            10   Runs tests/unit with the built-in Node test runner
-│   └── generate-icons.mjs      30   Optional: regenerate PNG icons (needs sharp, not a dependency)
+│   ├── generate-icons.mjs      30   Optional: regenerate PNG icons (needs sharp, not a dependency)
+│   └── android-icons.mjs      430   Zero-dependency Android launcher-icon generator + verifier (see below)
 ├── tests/
-│   ├── unit/                        markdown, state, wiring, project (40 tests, no dependencies)
+│   ├── unit/                        markdown, state, wiring, project, features, context,
+│   │                                android-icons (11), app-boot (6) — no dependencies
 │   └── e2e/ui.test.mjs        537   Playwright browser tests (40 tests, optional)
 └── docs/
     ├── STRUCTURE.md                 This report
@@ -77,3 +79,30 @@ Modified: `src/js/history.js` (new), `src/js/chat.js`, `src/js/transport.js`, `s
   chat, and explains attachment-only messages instead of sending an empty turn.
 - `backend/src/index.js` re-validates the same rules (`buildConversationMessages`), keeps Firebase token verification,
   UID rate limiting and the FREE model id, and forwards the history to Workers AI with a continuity-aware system prompt.
+
+## Android launcher icon (current branch)
+
+Modified: `.github/workflows/android-debug.yml`, `package.json`, `src/js/chat.js`, README.
+Added: `scripts/android-icons.mjs`, `tests/unit/android-icons.test.js`, `tests/unit/app-boot.test.js`.
+Unchanged: the in-app logo, `resources/`, the Worker, the build, the app wiring.
+
+`scripts/android-icons.mjs` derives the Android launcher icon from the official logo
+(`src/assets/logo/nyx-mark.png`) into `android/app/src/main/res` — 22 files across the five density
+buckets, the adaptive drawables and the `mipmap-anydpi-v26` adaptive XML. It uses only Node built-ins
+(its own PNG codec), and it verifies what it wrote: valid PNG, exact size, the mark actually present
+(average colour + detail), rounded corners where required, correct adaptive layers and resolvable XML
+references. CLI flags: `--check` (verify only), `--out <dir>`, `--logo <png>`, `--check-apk <path>`.
+Exit code 1 on any problem, so the workflow cannot package a broken icon.
+
+`tests/unit/android-icons.test.js` generates into a temp directory and asserts the same properties,
+plus failure modes (missing, corrupt, wrong size, wrong XML shape, empty tree) and CLI exit codes.
+
+`tests/unit/app-boot.test.js` bundles the real `src/js/app.js` with Firebase stubbed out and drives it
+in jsdom through sign-in, a message, a follow-up, a reload, a new chat and sign-out. It asserts that no
+`error` or `unhandledRejection` is raised and that the generic "Something went wrong" toast is never
+shown, and that a failure inside `send()` before the transport is reported as a conversation notice
+rather than escaping to the global handler.
+
+`src/js/chat.js` wraps the pre-transport part of `send()` in a try/catch: if the user message cannot be
+stored, the conversation gets an error notice and the transport is never called, instead of the rejected
+promise reaching `window`'s global error handler.
