@@ -47,7 +47,7 @@ jobs:
         run: |
           aapt2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)"
           "$aapt2" dump resources android/app/build/outputs/apk/debug/app-debug.apk > "$RUNNER_TEMP/nyx-resources.txt"
-          grep -E -B 2 -A 15 'ic_launcher' "$RUNNER_TEMP/nyx-resources.txt" > "$RUNNER_TEMP/nyx-launcher-configs.txt" || true
+          awk '/resource 0x/ { show = / (drawable|mipmap)\/ic_launcher(_round|_foreground|_background)?([[:space:]]|$)/ } show { print }' "$RUNNER_TEMP/nyx-resources.txt" > "$RUNNER_TEMP/nyx-launcher-configs.txt"
           cat "$RUNNER_TEMP/nyx-launcher-configs.txt"
           output="$(cat "$RUNNER_TEMP/nyx-launcher-configs.txt")"
           if [ -z "$output" ]; then output='No launcher configurations found in dump'; fi

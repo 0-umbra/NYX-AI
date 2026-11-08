@@ -195,7 +195,7 @@ function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foregr
   ]);
   const extraIndex = values.length;
   values.push('long-resource-path-' + 'x'.repeat(200)); // exercise two-byte UTF-8 lengths
-  if (extraForeground) values.push(`res/drawable-v24/ic_launcher_foreground.${extraForeground === 'png' ? 'png' : 'xml'}`);
+  if (extraForeground) values.push(`res/drawable-${extraForeground === 'anydpi' ? 'anydpi-' : ''}v24/ic_launcher_foreground.${extraForeground === 'png' ? 'png' : 'xml'}`);
   const backgroundIndex = values.length;
   if (extraBackground) values.push('res/drawable/ic_launcher_background.xml');
   const typeStrings = strings(['drawable', 'mipmap']);
@@ -219,6 +219,7 @@ function resourceTable({ qualifier = '-v4', foregroundName = 'ic_launcher_foregr
     const header = Buffer.alloc(84);
     header[8] = 1; header.writeUInt32LE(2, 12); header.writeUInt32LE(92, 16);
     header.writeUInt32LE(64, 20); header.writeUInt16LE(24, 44);
+    if (extraForeground === 'anydpi') header.writeUInt16LE(0xfffe, 34);
     const offsets = Buffer.alloc(8); offsets.writeUInt32LE(0xffffffff, 0); offsets.writeUInt32LE(0, 4);
     const entry = Buffer.alloc(16); entry.writeUInt16LE(8, 0); entry.writeUInt32LE(1, 4);
     entry.writeUInt16LE(8, 8); entry[11] = 3; entry.writeUInt32LE(extraIndex + 1, 12);
@@ -553,6 +554,8 @@ test('android icons: the generated set is exactly what an APK is checked against
     await checkChange('resources.arsc', resourceTable({ foregroundName: 'placeholder' }), /wrong drawable/);
     await checkChange('resources.arsc', resourceTable({ extraBackground: true }), /unverified drawable configuration: res\/drawable\/ic_launcher_background.xml/);
     await checkChange('resources.arsc', resourceTable({ extraForeground: true }), /unverified drawable configuration: res\/drawable-v24\/ic_launcher_foreground.xml/);
+    // AAPT2 compiles the Capacitor v24 vector as anydpi-v24, preferred over the PNGs.
+    await checkChange('resources.arsc', resourceTable({ extraForeground: 'anydpi' }), /unverified drawable configuration: res\/drawable-anydpi-v24\/ic_launcher_foreground.xml/);
     const pngAlternative = { name: 'res/drawable-v24/ic_launcher_foreground.png', data: await readFile(path.join(out, 'drawable-mdpi/ic_launcher_foreground.png')) };
     const withAlternative = entries.map((entry) => entry.name === 'resources.arsc' ? { ...entry, data: resourceTable({ extraForeground: 'png' }) } : entry).concat([pngAlternative]);
     await writeFile(apkPath, buildZip(withAlternative));
