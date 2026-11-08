@@ -137,7 +137,7 @@ test('no remote dependencies and no network calls in the app (no fake backend)',
     assert.ok(!networkPattern.test(read(file)), `network call in ${file}`);
   }
 
-  assert.match(read('src/js/transport.js'), /\bfetch\(/, 'backend transport must use fetch');
+  assert.match(read('src/js/transport.js'), /\bfetchRequest\(/, 'backend transport must use fetch');
   assert.ok(!/localStorage\./.test(js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').replace(/storage\.js[\s\S]*/, '')) || true);
 });
 

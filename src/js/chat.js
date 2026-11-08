@@ -1,20 +1,10 @@
-/**
- * Chat screen: message rendering, composer, attachments, scrolling and the (future) transport hook.
- *
- * There is NO AI engine here. Without a transport, every send ends with a clear
- * "AI backend not connected" notice. Stage 3 registers a transport with chat.setTransport(fn):
- *
- *   async function* transport({ conversationId, messages, model, signal }) { yield 'text chunk'; }
- *
- * `messages` is [{ role: 'user' | 'assistant', content }], `model` is 'free' | 'pro' | 'max'.
- * Throw an Error to show an error notice; abort via `signal` (Stop button) is handled here.
- */
+/** Chat rendering, composer, transport and client-side response reveal. */
 import { renderMarkdown } from './markdown.js';
 import { escapeHtml, formatBytes, plural } from './util.js';
 import { LIMITS } from './config.js';
+import { revealText } from './reveal.js';
+import { isModelAvailable } from './models.js';
 import { $, icon, toast, copyText } from './ui.js';
-
-const NOT_CONNECTED = '**AI backend not connected.** NYX AI can’t reply yet, so this message was saved on this device only.';
 
 export function messageHtml(msg) {
   if (msg.role === 'system') {
@@ -95,7 +85,9 @@ export function initChat({ store, getModelId }) {
     subs.forEach((fn) => fn(id));
   }
 
-  function stopGenerating() { abort?.abort(); }
+  function stopGenerating() {
+    abort?.abort();
+  }
 
   function newChat() {
     stopGenerating();
@@ -127,38 +119,45 @@ export function initChat({ store, getModelId }) {
   }
 
   async function runTransport(conv) {
-    abort = new AbortController();
+    const controller = new AbortController();
+    abort = controller;
     updateSend();
     const reply = store.addMessage(conv.id, { role: 'assistant', content: '' });
     append(reply);
-    const body = els.list.querySelector(`[data-id="${CSS.escape(reply.id)}"] .msg-body`);
     let text = '';
-    let frame = 0;
+    let failure = null;
     const paint = () => {
-      frame = 0;
+      if (activeId !== conv.id) return;
+      const body = els.list.querySelector(`[data-id="${CSS.escape(reply.id)}"] .msg-body`);
+      if (!body) return;
       const wasPinned = pinned();
       body.innerHTML = renderMarkdown(text);
-      if (wasPinned) scrollToBottom();
+      if (wasPinned) scrollToBottom(); else updateJump();
     };
     try {
       const history = store.get(conv.id).messages
         .filter((m) => m.role !== 'system' && m.id !== reply.id)
         .map(({ role, content }) => ({ role, content }));
-      for await (const chunk of transport({ conversationId: conv.id, messages: history, model: getModelId(), signal: abort.signal })) {
-        text += String(chunk);
-        if (!frame) frame = requestAnimationFrame(paint);
+      for await (const chunk of transport({ conversationId: conv.id, messages: history, model: getModelId(), signal: controller.signal })) {
+        await revealText(String(chunk), { signal: controller.signal, onText: (part) => { text += part; paint(); } });
       }
     } catch (err) {
       if (err?.name !== 'AbortError') {
-        console.error('[NYX] transport error', err);
-        store.addMessage(conv.id, { role: 'system', kind: 'error', content: '**Something went wrong.** The reply couldn’t be completed. Try again.' });
+        failure = err?.message === 'Your session has expired. Please sign in again.' || err?.message === 'Too many requests. Please wait a moment and try again.'
+          ? err.message : 'The reply couldn’t be completed. Check your connection and try again.';
       }
     } finally {
-      if (frame) cancelAnimationFrame(frame);
-      abort = null;
+      if (abort === controller) abort = null;
       if (text) store.updateMessage(conv.id, reply.id, { content: text });
       else store.removeMessage(conv.id, reply.id);
-      if (activeId === conv.id) render();
+      if (failure) store.addMessage(conv.id, { role: 'system', kind: 'error', content: failure });
+      if (activeId === conv.id) {
+        const wasPinned = pinned();
+        const scrollTop = els.scroller.scrollTop;
+        const convNow = store.get(conv.id);
+        els.list.innerHTML = (convNow?.messages ?? []).map(messageHtml).join('');
+        if (wasPinned) scrollToBottom(); else { els.scroller.scrollTop = scrollTop; updateJump(); }
+      }
       updateSend();
     }
   }
@@ -166,6 +165,7 @@ export function initChat({ store, getModelId }) {
   async function send() {
     const text = els.input.value.trim();
     if (generating() || (!text && attachments.length === 0)) return;
+    if (!isModelAvailable(getModelId())) { toast('This model tier is not available yet.'); return; }
     let conv = activeId ? store.get(activeId) : null;
     if (!conv) { conv = store.create(getModelId()); setActive(conv.id); }
     const files = attachments;
@@ -176,7 +176,7 @@ export function initChat({ store, getModelId }) {
     autosize();
 
     if (!transport) {
-      append(store.addMessage(conv.id, { role: 'system', kind: 'backend-offline', content: NOT_CONNECTED }));
+      append(store.addMessage(conv.id, { role: 'system', kind: 'backend-offline', content: 'Chat is temporarily unavailable. Please try again later.' }));
       return;
     }
     await runTransport(conv);
@@ -203,7 +203,7 @@ export function initChat({ store, getModelId }) {
     attachments.splice(Number(btn.dataset.removeFile), 1);
     renderAttachments();
   });
-  els.voice.addEventListener('click', () => toast('Voice input isn’t available yet. The backend isn’t connected.'));
+  els.voice.addEventListener('click', () => toast('Voice input isn’t available yet.'));
   els.jump.addEventListener('click', () => scrollToBottom(true));
   els.scroller.addEventListener('scroll', updateJump, { passive: true });
   els.welcome.addEventListener('click', (e) => {

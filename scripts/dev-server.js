@@ -51,7 +51,8 @@ export function createDevServer(root = ROOT) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 5173;
   const host = process.env.HOST || '127.0.0.1';
-  const server = createDevServer();
+  await import('./build.js');
+  const server = createDevServer(path.join(ROOT, 'www'));
   server.on('error', (err) => {
     console.error(err.code === 'EADDRINUSE' ? `Port ${port} is already in use. Try: PORT=${port + 1} npm run dev` : err.message);
     process.exit(1);
