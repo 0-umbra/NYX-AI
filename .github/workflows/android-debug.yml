@@ -1,5 +1,4 @@
 # Optional: build a debug APK in GitHub Actions, so you never need Android Studio on your phone.
-# To use it: copy this file to .github/workflows/android-debug.yml on the `develop` branch.
 # NOTE: written for Capacitor 7 (needs Java 21). Not run as part of Stage 2 — verify the first run.
 name: Android debug APK
 on:
@@ -20,7 +19,15 @@ jobs:
       - run: npm run build
       - run: npx cap add android        # remove this line once android/ is committed
       - run: npx cap sync android
+      # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark.png)
+      # and written into the Android resource tree. This step generates it and verifies it, and it
+      # fails the build if any required variant is missing, malformed or not the NYX AI mark, so a
+      # broken icon can never be packaged into the APK. Run it after `cap sync`, which may rewrite
+      # the resources from resources/.
+      - run: node scripts/android-icons.mjs
       - run: cd android && ./gradlew assembleDebug
+      # Confirm the icon really is inside the packaged APK, not just in the source tree.
+      - run: node scripts/android-icons.mjs --check-apk android/app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
         with:
           name: nyx-ai-debug-apk
