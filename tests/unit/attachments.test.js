@@ -111,6 +111,21 @@ test('extractDocumentText: reads txt, md, json and csv as text', async () => {
   assert.equal(empty.text, '');
 });
 
+/** Assembles a list of PDF object bodies into a minimal valid PDF file. */
+function assemblePdf(objects) {
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  objects.forEach((body, i) => {
+    offsets.push(pdf.length);
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= objects.length; i++) pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return new TextEncoder().encode(pdf);
+}
+
 /** Builds a minimal one-page PDF with a text layer (validated against the real PDF.js below). */
 function samplePdfBytes(text) {
   const lines = String(text).split('\n').map((l) => l.replace(/[\\()]/g, (c) => `\\${c}`));
@@ -128,17 +143,28 @@ function samplePdfBytes(text) {
     `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
   ];
-  let pdf = '%PDF-1.4\n';
-  const offsets = [0];
-  objects.forEach((body, i) => {
-    offsets.push(pdf.length);
-    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
-  });
-  const xref = pdf.length;
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (let i = 1; i <= objects.length; i++) pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  return new TextEncoder().encode(pdf);
+  return assemblePdf(objects);
+}
+
+/** Builds a multi-page PDF. pageText(pageNumber) returns one line per page; '' leaves a page without text. */
+function multiPagePdfBytes(pageCount, pageText = () => '') {
+  const fontId = 3 + pageCount * 2;
+  const kids = [];
+  for (let i = 0; i < pageCount; i += 1) kids.push(`${3 + i * 2} 0 R`);
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${pageCount} >>`,
+  ];
+  for (let i = 0; i < pageCount; i += 1) {
+    const pageId = 3 + i * 2;
+    const contentId = pageId + 1;
+    const line = String(pageText(i + 1) ?? '').replace(/[\\()]/g, (c) => `\\${c}`).slice(0, 200);
+    const stream = line ? `BT /F1 12 Tf 72 750 Td (${line}) Tj ET` : '';
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentId} 0 R /Resources << /Font << /F1 ${fontId} 0 R >> >> >>`);
+    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  }
+  objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  return assemblePdf(objects);
 }
 
 test('extractPdfText: extracts text from a real PDF via PDF.js', async () => {
@@ -162,6 +188,35 @@ test('extractPdfText: stops at the character budget for huge documents', async (
   const result = await extractPdfText(bytes, { maxChars: 200 });
   assert.ok(result.text.length <= 260, `got ${result.text.length}`);
   assert.equal(result.truncated, true);
+});
+
+test('extractPdfText: a PDF beyond the 200-page limit is read only up to the limit and marked truncated', async () => {
+  const bytes = multiPagePdfBytes(205);
+  const result = await extractPdfText(bytes);
+  assert.equal(result.pageCount, 205);
+  assert.equal(result.pagesRead, 200, 'must never read page 201');
+  assert.equal(result.truncated, true, 'a partially read document must be marked truncated');
+  assert.equal(result.likelyScanned, true);
+});
+
+test('extractPdfText: an ordinary multi-page PDF under the limit is fully read and not truncated', async () => {
+  const bytes = multiPagePdfBytes(3, (page) => `PAGE-${String(page).padStart(3, '0')} ${'ordinary content for this page '.repeat(3)}`);
+  const result = await extractPdfText(bytes);
+  assert.equal(result.pageCount, 3);
+  assert.equal(result.pagesRead, 3);
+  assert.equal(result.truncated, false);
+  assert.match(result.text, /PAGE-001/);
+  assert.match(result.text, /PAGE-003/);
+  assert.equal(result.likelyScanned, false);
+});
+
+test('extractPdfText: a 200-page PDF is fully read and not marked truncated', async () => {
+  const bytes = multiPagePdfBytes(200, (page) => page === 200 ? 'FINAL-PAGE-200 marker for the boundary test of the page limit' : '');
+  const result = await extractPdfText(bytes);
+  assert.equal(result.pageCount, 200);
+  assert.equal(result.pagesRead, 200);
+  assert.equal(result.truncated, false);
+  assert.match(result.text, /FINAL-PAGE-200/);
 });
 
 // --- wire payload building ----------------------------------------------------

@@ -101,15 +101,18 @@ async function defaultLoadDocument(data) {
  * Extracts text from a PDF. Stops as soon as the character budget is reached so a 500-page
  * scan is never fully read. Returns per-document text plus scanned-PDF detection.
  */
-export async function extractPdfText(data, { maxChars = LIMITS.maxDocumentChars, loadDocument = defaultLoadDocument } = {}) {
+export async function extractPdfText(data, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxPdfPages, loadDocument = defaultLoadDocument } = {}) {
   const doc = await loadDocument(new Uint8Array(data));
   try {
     const pageCount = doc.numPages;
+    // Strict page-iteration ceiling: a huge scanned PDF with no text layer must not keep
+    // the device busy. Pages beyond the limit are never loaded or read.
+    const pagesToRead = Math.min(pageCount, Math.max(1, maxPages));
     const parts = [];
     let total = 0;
     let pagesRead = 0;
     let truncated = false;
-    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    for (let pageNumber = 1; pageNumber <= pagesToRead; pageNumber += 1) {
       const page = await doc.getPage(pageNumber);
       const content = await page.getTextContent();
       const pageText = content.items.map((item) => (typeof item.str === 'string' ? item.str : '')).join(' ').replace(/[ \t]+/g, ' ').trim();
@@ -123,6 +126,7 @@ export async function extractPdfText(data, { maxChars = LIMITS.maxDocumentChars,
         if (slice.length < pageText.length || total >= maxChars) { truncated = true; break; }
       }
     }
+    if (pageCount > pagesToRead) truncated = true;
     const text = parts.join('\n\n');
     const cleaned = cleanExtractedText(text, { maxChars });
     // A text layer yielding almost nothing means the pages are images (scanned).

@@ -30,6 +30,7 @@ export const LIMITS = Object.freeze({
   maxImageEdge: 1024,
   maxImageBytes: 1_400_000, // decoded bytes per image
   maxOcrPages: 3,             // scanned-PDF pages read through the vision model per document
+  maxPdfPages: 200,           // pages read at most in one PDF (text extraction and scanned detection)
   maxDocumentChars: 8000,     // extracted text per document
   maxTotalDocumentChars: 12000, // extracted text across documents per message
   maxAnalysisChars: 1600,     // vision-model analysis kept per image
