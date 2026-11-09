@@ -17,7 +17,7 @@ export function messageHtml(msg) {
   const body = msg.role === 'user'
     ? `<div class="msg-text">${escapeHtml(msg.content)}</div>${files}`
     : `<div class="msg-body md">${msg.content ? renderMarkdown(msg.content) : '<span class="typing" aria-label="NYX AI is responding"><i></i><i></i><i></i></span>'}</div>`;
-  const avatar = msg.role === 'assistant' ? '<img class="msg-avatar" src="src/assets/logo/nyx-mark-512.png" alt="" width="30" height="30">' : '';
+  const avatar = msg.role === 'assistant' ? '<img class="msg-avatar" src="src/assets/logo/nyx-mark-512-transparent.png" alt="" width="30" height="30">' : '';
   return `<li class="msg msg-${msg.role}" data-id="${escapeHtml(msg.id)}">${avatar}<div class="msg-main"><div class="msg-bubble">${body}</div>`
     + `<div class="msg-actions"><button type="button" class="act" data-copy-msg aria-label="Copy message">${icon('copy')}</button></div></div></li>`;
 }

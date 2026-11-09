@@ -145,7 +145,7 @@ test('starts cleanly: welcome screen, tagline and brand, no errors', async () =>
   assert.equal(await page.evaluate(() => document.getElementById('boot-error').hidden), true);
   assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(0, 0, 0)', 'Pure Black is the default theme');
   const logo = await page.$eval('.welcome-logo img', (e) => e.getAttribute('src'));
-  assert.equal(logo, 'src/assets/logo/nyx-mark-512.png', 'the official NYX logo is used');
+  assert.equal(logo, 'src/assets/logo/nyx-mark-512-transparent.png', 'the official NYX logo is used');
 });
 
 test('signed-out users get the themed auth gate; signing in opens the app and persists', async () => {
@@ -583,7 +583,7 @@ test('touch targets: interactive controls are at least 40px', async () => {
 test('every image and asset loads (no missing assets); official logo is untouched', async () => {
   const broken = await page.$$eval('img', (imgs) => imgs.filter((i) => !i.complete || i.naturalWidth === 0).map((i) => i.src));
   assert.deepEqual(broken, []);
-  for (const path of ['manifest.webmanifest', 'src/assets/icons/icon-192.png', 'src/assets/icons/icon-512.png', 'src/assets/icons/icon-maskable-512.png', 'src/assets/logo/nyx-mark-512.png']) {
+  for (const path of ['manifest.webmanifest', 'src/assets/icons/icon-192.png', 'src/assets/icons/icon-512.png', 'src/assets/icons/icon-maskable-512.png', 'src/assets/logo/nyx-mark-512-transparent.png']) {
     assert.equal((await page.request.get(base + path)).status(), 200, path);
   }
 });

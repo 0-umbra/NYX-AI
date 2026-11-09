@@ -56,6 +56,16 @@ jobs:
             sed -i 's|distributionUrl=https://services.gradle.org/distributions/gradle-8.11.1-all.zip|distributionUrl=https://services.gradle.org/distributions/gradle-8.11.1-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
             sed -i 's|networkTimeout=10000|networkTimeout=120000|g' android/gradle/wrapper/gradle-wrapper.properties
           fi
+      
+      - name: Verify @capacitor/status-bar plugin
+        run: |
+          if [ -d node_modules/@capacitor/status-bar ]; then
+            echo "Status bar plugin installed"
+          else
+            echo "Error: @capacitor/status-bar plugin not installed"
+            exit 1
+          fi
+
       - run: npx cap sync android
       # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark-512.png)
       # and written into the Android resource tree. This step generates it and verifies it, and it

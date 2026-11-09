@@ -5,7 +5,12 @@
   "backgroundColor": "#000000",
   "android": {
     "backgroundColor": "#000000",
-    "allowMixedContent": false
+    "allowMixedContent": false,
+    "statusBar": {
+      "style": "dark",
+      "backgroundColor": "#00000000",
+      "overlaysWebView": true
+    }
   },
   "server": {
     "androidScheme": "https"
