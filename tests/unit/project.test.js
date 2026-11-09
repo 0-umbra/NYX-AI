@@ -26,11 +26,13 @@ test('package.json: no frameworks and only Capacitor dependencies', () => {
   const deps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
   assert.ok(deps.length > 0);
   for (const d of deps) assert.ok(
-    /^@capacitor\//.test(d) || d === 'firebase' || d === 'esbuild' || d === 'jsdom',
+    /^@capacitor\//.test(d) || d === 'firebase' || d === 'esbuild' || d === 'jsdom' || d === 'sharp',
     `unexpected dependency ${d}`
   );
   assert.ok(pkg.devDependencies.esbuild, 'esbuild must remain a development dependency');
   assert.ok(!pkg.dependencies.esbuild, 'esbuild must not be a runtime dependency');
+  // Sharp is intentionally used for logo/icon image processing in Phase 2A
+  assert.ok(pkg.dependencies.sharp || pkg.devDependencies.sharp, 'sharp must be present for image processing');
   for (const bad of ['react', 'vue', 'angular', 'jquery', 'svelte', 'express']) assert.ok(!deps.includes(bad));
 });
 
@@ -45,7 +47,7 @@ test('capacitor.config.json: valid app id, name and webDir produced by the build
 test('build produces a complete www/ directory', () => {
   const r = spawnSync(process.execPath, ['scripts/build.js'], { cwd: ROOT, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  for (const f of ['index.html', 'manifest.webmanifest', 'src/js/app.js', 'src/css/components.css', 'src/assets/logo/nyx-mark.png', 'src/assets/icons/icon-512.png']) {
+  for (const f of ['index.html', 'manifest.webmanifest', 'src/js/app.js', 'src/css/components.css', 'src/assets/logo/nyx-mark-512.png', 'src/assets/icons/icon-512.png']) {
     assert.ok(existsSync(path.join(ROOT, 'www', f)), `www/${f}`);
   }
   assert.ok(!existsSync(path.join(ROOT, 'www', 'package.json')));

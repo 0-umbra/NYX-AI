@@ -19,9 +19,38 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run build
-      - run: npx cap add android        # remove this line once android/ is committed
+      # CI FIX: The repository's committed "android/" directory contains ONLY launcher icon resources,
+      # not a complete Capacitor Android project scaffold. Therefore, "./gradlew" does not exist.
+      # In the temporary GitHub Actions checkout only, we:
+      # 1. Preserve the existing committed launcher resources.
+      # 2. Temporarily move the incomplete "android/" directory out of the way.
+      # 3. Run "npx cap add android" using the repository's pinned Capacitor version to generate a genuine Android project.
+      # 4. Restore/overlay the preserved NYX launcher resources into the generated Android project.
+      # 5. Run "npx cap sync android".
+      # 6. Run icon generation and verification.
+      # 7. Build the APK using "cd android && ./gradlew assembleDebug".
+      # 8. Run packaged APK icon verification and preserve artifact upload with "if: always()".
+      - name: Scaffold Capacitor Android project and restore resources
+        run: |
+          # Preserve existing committed launcher resources
+          mkdir -p .tmp_resources
+          cp -r android/app/src/main/res/.tmp_resources/ 2>/dev/null || true
+          mv android android_incomplete_backup || true
+          # Scaffold genuine Capacitor Android project
+          npx cap add android
+          # Restore/overlay preserved NYX launcher resources into the generated project
+          if [ -d .tmp_resources ]; then
+            cp -r .tmp_resources/* android/app/src/main/res/ 2>/dev/null || true
+            rm -rf .tmp_resources
+          fi
+          # If the original android/app/src/main/res/ had files not in .tmp_resources (committed), restore them
+          if [ -d android_incomplete_backup/app/src/main/res ]; then
+            cp -r android_incomplete_backup/app/src/main/res/* android/app/src/main/res/ 2>/dev/null || true
+          fi
+          # Clean up backup
+          rm -rf android_incomplete_backup
       - run: npx cap sync android
-      # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark.png)
+      # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark-512.png)
       # and written into the Android resource tree. This step generates it and verifies it, and it
       # fails the build if any required variant is missing, malformed or not the NYX AI mark, so a
       # broken icon can never be packaged into the APK. Run it after `cap sync`, which may rewrite

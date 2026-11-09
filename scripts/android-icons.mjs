@@ -34,7 +34,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_LOGO = path.join(ROOT, 'src/assets/logo/nyx-mark.png');
+const DEFAULT_LOGO = path.join(ROOT, 'src/assets/logo/nyx-mark-512.png');
 const DEFAULT_OUT = path.join(ROOT, 'android', 'app', 'src', 'main', 'res');
 
 // The app's launcher background (matches capacitor.config.json / resources/icon-background.png).

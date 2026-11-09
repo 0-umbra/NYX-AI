@@ -14,7 +14,7 @@ const require = createRequire(import.meta.url);
 const sharp = require('sharp');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const out = (p) => path.join(root, p);
-const logo = out('src/assets/logo/nyx-mark.png');
+const logo = out('src/assets/logo/nyx-mark-512.png');
 
 const png = (image) => image.png({ compressionLevel: 9, adaptiveFiltering: true, effort: 10 });
 const squared = (size) => sharp(logo).resize(size, size, { fit: 'fill' });
