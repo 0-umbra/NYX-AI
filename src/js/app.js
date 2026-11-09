@@ -9,6 +9,7 @@ import { createTransport } from './transport.js';
 import { initAuth } from './auth.js';
 import { initSidebar } from './sidebar.js';
 import { $, toast, closeTopDialog } from './ui.js';
+import { syncStatusBar } from './status-bar.js';
 
 function bindViewport() {
   const root = document.documentElement;
@@ -45,6 +46,8 @@ function showFatal(err) {
 function boot() {
   const prefs = createPrefs(storage);
   applyPrefs(prefs.all());
+  syncStatusBar(prefs.get('theme'));
+  prefs.subscribe((prefs) => syncStatusBar(prefs.theme));
   bindViewport();
   bindGlobalErrors();
 
