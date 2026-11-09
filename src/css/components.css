@@ -52,7 +52,7 @@
 }
 
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand img { width: 30px; height: 30px; }
+.brand img { width: 30px; height: 30px; object-fit: contain; }
 .brand-name { font-weight: 650; letter-spacing: 0.14em; }
 
 /* ── Sidebar parts ─────────────────────────────────────── */
@@ -94,12 +94,7 @@
 .welcome { flex: 1 0 auto; align-self: center; width: 100%; max-width: 760px; display: flex; flex-direction: column; justify-content: center; gap: 30px; padding: 8px 0 12px; }
 .welcome-hero { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
 .welcome-logo { position: relative; width: 96px; height: 96px; margin-bottom: 8px; }
-.welcome-logo::before {
-  content: ""; position: absolute; inset: -30px; border-radius: 50%;
-  background: var(--welcome-halo);
-  animation: breathe 6s ease-in-out infinite;
-}
-.welcome-logo img { position: relative; width: 100%; height: 100%; }
+.welcome-logo img { position: relative; width: 100%; height: 100%; object-fit: contain; }
 @keyframes breathe { 0%, 100% { opacity: 0.6; transform: scale(0.97); } 50% { opacity: 0.95; transform: scale(1.04); } }
 .welcome h2 { font-size: 1.75rem; font-weight: 600; letter-spacing: 0.18em; text-indent: 0.18em; }
 .welcome-tagline { color: var(--text-2); font-weight: 400; letter-spacing: 0.04em; }
@@ -143,7 +138,6 @@
   .welcome { gap: 8px; padding: 0; }
   .welcome-hero { gap: 6px; }
   .welcome-logo { width: 52px; height: 52px; margin-bottom: 0; }
-  .welcome-logo::before { inset: -14px; }
   .welcome h2 { font-size: 1.25rem; }
   .welcome-tagline { font-size: 0.875rem; }
   .composer-hint { display: none; }
@@ -424,7 +418,7 @@ dialog[open]::backdrop { animation: fade var(--dur) ease; }
   border: 1px solid var(--line-strong); border-radius: var(--radius-xl);
   background: var(--surface); box-shadow: var(--shadow-3);
 }
-.auth-logo { display: block; width: 64px; height: 64px; margin-bottom: 18px; }
+.auth-logo { display: block; width: 64px; height: 64px; margin-bottom: 18px; object-fit: contain; }
 .auth-eyebrow { color: var(--accent-text); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.18em; }
 .auth-card h1 { font-size: clamp(1.55rem, 6vw, 1.9rem); letter-spacing: -0.02em; margin: 8px 0; font-weight: 650; }
 .auth-intro, .auth-loading, .auth-footnote { color: var(--text-2); font-size: 0.9rem; }
