@@ -34,7 +34,9 @@ jobs:
         run: npm run build
       - name: Browser e2e suite (all themes)
         id: e2e
-        run: npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e-output.txt"
+        run: |
+          set -o pipefail
+          npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e-output.txt"
         env:
           NYX_E2E_SHOTS_DIR: ${{ runner.temp }}/nyx-e2e-shots
       - uses: actions/upload-artifact@v4
@@ -51,14 +53,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          SUMMARY=$(grep -E '^# (tests|pass|fail) ' "$RUNNER_TEMP/e2e-output.txt" | paste -sd' · ' - || true)
+          SUMMARY=$(grep -E '^# (tests|pass|fail) ' "$RUNNER_TEMP/e2e-output.txt" | tr '\n' ' ' || true)
           {
             echo "### E2E (Playwright) — ${{ steps.e2e.outcome }} (run ${{ github.run_number }})"
             echo ''
             echo "> ${SUMMARY:-no TAP summary found}"
             echo ''
-            if [ "${{ steps.e2e.outcome }}" != "success" ]; then
-              echo '<details><summary>Failing tests (TAP excerpt)</summary>'
+            if grep -q 'not ok' "$RUNNER_TEMP/e2e-output.txt"; then
+              echo '**Failing tests:**'
+              echo ''
+              grep 'not ok' "$RUNNER_TEMP/e2e-output.txt" | sed 's/^/- /' | head -40
+              echo ''
+              echo '<details><summary>TAP excerpt</summary>'
               echo ''
               echo '```'
               grep -A 22 'not ok [0-9]' "$RUNNER_TEMP/e2e-output.txt" | head -c 55000 || true
