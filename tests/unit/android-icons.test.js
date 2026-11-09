@@ -31,7 +31,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SCRIPT = path.join(ROOT, 'scripts', 'android-icons.mjs');
-const LOGO = path.join(ROOT, 'src', 'assets', 'logo', 'nyx-mark.png');
+const LOGO = path.join(ROOT, 'src', 'assets', 'logo', 'nyx-mark-512.png');
 
 const tempDir = async () => mkdtemp(path.join(tmpdir(), 'nyx-icons-'));
 
