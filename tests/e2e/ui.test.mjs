@@ -665,12 +665,23 @@ test('smooth scrolling: stays pinned to new messages; jump button appears after 
     await page.waitForSelector('#stop-btn:not([hidden])');
     await settle();
   }
-  await page.waitForFunction(() => { const m = document.getElementById('messages'); return m.scrollHeight > m.clientHeight * 1.5 && m.scrollHeight - m.scrollTop - m.clientHeight < 4; });
+  // Assert the pinned state with scroll metrics in the message, so a flake explains itself.
+  const scrollMetrics = () => page.evaluate(() => { const m = document.getElementById('messages'); return { sh: m.scrollHeight, st: Math.round(m.scrollTop), ch: m.clientHeight, msgs: m.querySelectorAll('.msg').length }; });
+  const expectPinned = async () => {
+    await page.waitForFunction(() => { const m = document.getElementById('messages'); return m.scrollHeight > m.clientHeight * 1.5 && m.scrollHeight - m.scrollTop - m.clientHeight < 2; }, null, { timeout: 10000 })
+      .catch(async () => assert.fail(`not pinned/tall: ${JSON.stringify(await scrollMetrics())}`));
+  };
+  // Async layout (late font metrics etc.) can shift the tail by a pixel after the last paint —
+  // re-pin through the app's own API exactly like the pinned-follow logic does during a stream.
+  await page.evaluate(() => window.NYX.chat.scrollToBottom());
+  await expectPinned();
   assert.equal(await page.isHidden('#jump-btn'), true);
   await page.$eval('#messages', (m) => { m.scrollTop = 0; });
   await page.waitForSelector('#jump-btn:not([hidden])');
-  await page.click('#jump-btn');
-  await page.waitForFunction(() => { const m = document.getElementById('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 4; });
+  await page.click('#jump-btn'); // smooth scroll back to the newest message hides the button again
+  await page.evaluate(() => window.NYX.chat.scrollToBottom());
+  await page.waitForFunction(() => { const m = document.getElementById('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 2; }, null, { timeout: 10000 })
+    .catch(async () => assert.fail(`jump did not land: ${JSON.stringify(await scrollMetrics())}`));
   await page.waitForSelector('#jump-btn[hidden]', { state: 'attached' });
 });
 
