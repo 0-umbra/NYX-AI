@@ -25,6 +25,18 @@ export const LIMITS = Object.freeze({
   maxMessageLength: 8000,
   maxAttachments: 5,
   maxAttachmentBytes: 10 * 1024 * 1024,
+  // Images are re-encoded down to these bounds before being sent to the Worker
+  // (which enforces the same caps server-side — keep the two in sync with backend/src/attachments.js).
+  maxImageEdge: 1024,
+  maxImageBytes: 1_400_000, // decoded bytes per image
+  maxOcrPages: 3,             // scanned-PDF pages read through the vision model per document
+  maxDocumentChars: 8000,     // extracted text per document
+  maxTotalDocumentChars: 12000, // extracted text across documents per message
+  maxAnalysisChars: 1600,     // vision-model analysis kept per image
+  maxStoredExtractedChars: 4000, // document text persisted on-device for follow-up context
+  maxStoredImageThumbChars: 6000, // persisted 96px preview per image (optional)
+  // Transport guard: refuse to send a request whose JSON body exceeds this size.
+  maxRequestBytes: 6 * 1024 * 1024,
   maxConversations: 100,
   maxMessagesPerConversation: 500,
   // Conversation context sent with each request. Must stay inside the Worker limits

@@ -52,6 +52,10 @@ export function sendPasswordResetEmail() { return Promise.resolve(); }
 export function updateProfile(user, { displayName }) { user.displayName = displayName; write(plain(user)); return Promise.resolve(); }
 `;
 
+// Real 1x1 image fixtures (the composer validates image contents, not just extensions).
+const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const JPEG_1PX = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z', 'base64');
+
 let workDir, server, browser, base, ctx, page, problems;
 
 before(async () => {
@@ -462,10 +466,11 @@ test('about and model information screens show honest status', async () => {
 test('attachments: add, show chips, remove, send as metadata; limits enforced', async () => {
   await page.setInputFiles('#file-input', [
     { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') },
-    { name: 'pic.png', mimeType: 'image/png', buffer: Buffer.alloc(2048) },
+    { name: 'pic.png', mimeType: 'image/png', buffer: PNG_1PX },
   ]);
   assert.equal(await page.locator('.attachment').count(), 2);
-  assert.equal(await page.isDisabled('#send-btn'), false, 'attachments alone can be sent');
+  await page.waitForSelector('.attachment-status.is-ok >> nth=1');
+  assert.equal(await page.isDisabled('#send-btn'), false, 'attachments alone can enable send once processed');
   await page.click('[data-remove-file="0"]');
   assert.equal(await page.locator('.attachment').count(), 1);
   await page.click('#send-btn');
@@ -635,13 +640,15 @@ test('composer: attachment, image, voice and send controls are present and tappa
   assert.equal(await page.isHidden('#stop-btn'), true);
 });
 
-test('image button attaches images as metadata with an image icon (no image understanding yet)', async () => {
-  await page.setInputFiles('#image-input', [{ name: 'photo.jpg', mimeType: 'image/jpeg', buffer: Buffer.alloc(1024) }]);
-  assert.equal(await page.locator('.attachment use[href="#i-image"]').count(), 1);
-  assert.equal(await page.getAttribute('#image-input', 'accept'), 'image/*');
+test('image button attaches an image; it is ready to analyse after processing', async () => {
+  await page.setInputFiles('#image-input', [{ name: 'photo.jpg', mimeType: 'image/jpeg', buffer: JPEG_1PX }]);
+  await page.waitForSelector('.attachment-status.is-ok');
+  // Real thumbnails replace the generic icon once the image pipeline finishes.
+  assert.equal(await page.locator('.attachment img.attachment-thumb').count(), 1);
+  assert.equal(await page.getAttribute('#image-input', 'accept'), 'image/jpeg,image/png,image/webp');
   await page.click('#send-btn');
   assert.match(await page.textContent('.msg-files'), /photo\.jpg/);
-  assert.match(await page.textContent('.msg-system'), /stored on this device only/);
+  assert.match(await page.textContent('.msg-system'), /Attachments need a message/);
 });
 
 test('keyboard open (short viewport): welcome stays fully visible and the composer is usable', async () => {

@@ -42,6 +42,15 @@ function setupDom() {
 const freshStorage = () => createStorage(new FakeLocalStorage());
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const settle = async (promise) => { await promise; await tick(); };
+/** Poll until pending attachments finish processing (text extraction is genuinely async). */
+const waitFor = async (predicate, { timeout = 5000, step = 5 } = {}) => {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() > deadline) throw new Error('waitFor timed out');
+    await new Promise((resolve) => setTimeout(resolve, step));
+  }
+};
 
 /** A chat screen wired to a fake backend that records every request payload. */
 function setupChat({ storage = freshStorage(), dom = setupDom() } = {}) {
@@ -281,6 +290,7 @@ test('chat: an attachment-only message is explained instead of sent empty', asyn
   Object.defineProperty(input, 'files', { value: [file], configurable: true });
   input.dispatchEvent(new dom.window.Event('change'));
   assert.equal(store.count(), 0);
+  await waitFor(() => document.querySelector('.attachment-status.is-ok'));
 
   await settle(chat.send());
   assert.equal(sent.length, 0, 'nothing is sent without text');

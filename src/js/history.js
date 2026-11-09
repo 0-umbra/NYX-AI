@@ -7,9 +7,15 @@
  * written while a reply is still arriving, and attachment-only messages with no text — so this
  * module turns stored messages into the clean `[{ role, content }]` list that is sent.
  *
- * Rules (covered by tests/unit/context.test.js):
+ * Attachment-aware: when a stored user turn carries extracted content (an image analysis or a
+ * document's text, persisted on-device at send time), it is folded into that turn's content so
+ * follow-up questions keep working without re-uploading the file. Only extracted content is
+ * folded in — attachment metadata (names alone) never becomes model context.
+ *
+ * Rules (covered by tests/unit/context.test.js and tests/unit/attachment-context.test.js):
  *  - only `user` and `assistant` turns are sent (never local notices, never another chat);
  *  - blank turns are dropped, because an empty message invalidates the whole request;
+ *  - a turn with only extracted attachment context and no text is still sent;
  *  - the newest turn is always included, kept last and included exactly once;
  *  - history never starts with an assistant reply (a truncated turn confuses the model);
  *  - size is bounded by message count, per-message length and total characters.
@@ -24,13 +30,50 @@ export const HISTORY_LIMITS = Object.freeze({
 
 const isChatRole = (role) => role === 'user' || role === 'assistant';
 
+// Bounds for the attachment context folded into history turns. The current message always
+// reaches the model with its full payload via the attachments field; these blocks exist so
+// follow-up turns keep the extracted content available with the Worker being stateless.
+const MAX_IMAGE_BLOCK_CHARS = 700;
+const MAX_DOCUMENT_BLOCK_CHARS = 1500;
+
+/**
+ * Builds the bounded `[Attached …]` context block for a stored message, or an empty string.
+ * Only extracted content (image analyses, document text) is folded in — never filenames alone.
+ */
+export function attachmentContextBlock(message, { imageChars = MAX_IMAGE_BLOCK_CHARS, documentChars = MAX_DOCUMENT_BLOCK_CHARS } = {}) {
+  if (!message || typeof message !== 'object' || !Array.isArray(message.attachments)) return '';
+  const blocks = [];
+  for (const attachment of message.attachments) {
+    if (!attachment || typeof attachment !== 'object') continue;
+    const name = String(attachment.name ?? 'file').slice(0, 120);
+    const analysis = typeof attachment.analysis === 'string' ? attachment.analysis.trim() : '';
+    const extracted = typeof attachment.extractedText === 'string' ? attachment.extractedText.trim() : '';
+    if (analysis) blocks.push(`[Attached image "${name}": ${analysis.slice(0, imageChars)}]`);
+    else if (extracted) blocks.push(`[Attached document "${name}": ${extracted.slice(0, documentChars)}]`);
+  }
+  return blocks.join('\n');
+}
+
 /** Returns a clean `{ role, content }` copy of a stored message, or null when it carries no context. */
 export function toChatMessage(message, { maxMessageChars = HISTORY_LIMITS.maxMessageChars } = {}) {
   if (!message || typeof message !== 'object' || !isChatRole(message.role)) return null;
-  if (typeof message.content !== 'string' || !message.content.trim()) return null;
-  const content = message.content.length > maxMessageChars
-    ? message.content.slice(0, maxMessageChars)
-    : message.content;
+  const raw = typeof message.content === 'string' ? message.content : '';
+  const text = raw.trim();
+  const block = attachmentContextBlock(message);
+  if (!text && !block) return null;
+
+  const parts = [];
+  if (text) parts.push(text);
+  if (block) parts.push(block);
+  let content = parts.join('\n');
+  if (content.length > maxMessageChars) {
+    // The user's own words lose characters before the extracted attachment context does.
+    const blockRoom = block ? Math.min(block.length, Math.floor(maxMessageChars * 0.7)) : 0;
+    const headRoom = Math.max(0, maxMessageChars - (blockRoom ? blockRoom + 1 : 0));
+    content = block
+      ? [text.slice(0, headRoom), block.slice(0, blockRoom)].filter(Boolean).join('\n')
+      : text.slice(0, maxMessageChars);
+  }
   if (!content.trim()) return null;
   return { role: message.role, content };
 }

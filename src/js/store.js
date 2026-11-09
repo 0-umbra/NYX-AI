@@ -6,6 +6,34 @@ const KEY = 'conversations';
 const ROLES = ['user', 'assistant', 'system'];
 export const DEFAULT_TITLE = 'New chat';
 
+// Attachments persist metadata plus bounded extracted content (image analyses, document text)
+// so stateless follow-up turns keep their context. Originals are never stored anywhere.
+const MAX_ATTACHMENT_NAME = 160;
+const MAX_ANALYSIS_CHARS = 1600;
+const MAX_EXTRACTED_CHARS = 4000;
+const MAX_THUMB_CHARS = 6000;
+const KINDS = new Set(['image', 'document']);
+
+export function sanitizeAttachment(a) {
+  if (!a || typeof a !== 'object') return null;
+  const name = String(a.name ?? '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, MAX_ATTACHMENT_NAME);
+  if (!name) return null;
+  const out = {
+    name,
+    size: Number.isFinite(a.size) && a.size >= 0 ? Math.floor(a.size) : 0,
+    type: String(a.type ?? '').slice(0, 80),
+  };
+  if (KINDS.has(a.kind)) out.kind = a.kind;
+  if (typeof a.analysis === 'string' && a.analysis.trim()) out.analysis = a.analysis.slice(0, MAX_ANALYSIS_CHARS);
+  if (typeof a.extractedText === 'string' && a.extractedText.trim()) out.extractedText = a.extractedText.slice(0, MAX_EXTRACTED_CHARS);
+  if (Number.isInteger(a.pageCount) && a.pageCount > 0) out.pageCount = Math.min(a.pageCount, 5000);
+  if (a.truncated === true) out.truncated = true;
+  if (a.scanned === true) out.scanned = true;
+  if (Number.isInteger(a.ocrPages) && a.ocrPages > 0) out.ocrPages = Math.min(a.ocrPages, 10);
+  if (typeof a.thumb === 'string' && a.thumb.startsWith('data:image/') && a.thumb.length <= MAX_THUMB_CHARS) out.thumb = a.thumb;
+  return out;
+}
+
 export function sanitize(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -18,7 +46,14 @@ export function sanitize(raw) {
       model: typeof c.model === 'string' ? c.model : 'free',
       createdAt: Number(c.createdAt) || Date.now(),
       updatedAt: Number(c.updatedAt) || Date.now(),
-      messages: c.messages.filter((m) => m && typeof m.id === 'string' && typeof m.content === 'string' && ROLES.includes(m.role)),
+      messages: c.messages
+        .filter((m) => m && typeof m.id === 'string' && typeof m.content === 'string' && ROLES.includes(m.role))
+        .map((m) => ({
+          ...m,
+          ...(Array.isArray(m.attachments)
+            ? { attachments: m.attachments.map(sanitizeAttachment).filter(Boolean) }
+            : {}),
+        })),
     }));
 }
 
@@ -72,7 +107,7 @@ export function createStore(storage) {
       const conv = find(convId);
       if (!conv || !ROLES.includes(role)) return null;
       const msg = { id: uid(), role, content: String(content ?? ''), ts: Date.now() };
-      if (attachments.length) msg.attachments = attachments.map(({ name, size, type }) => ({ name, size, type }));
+      if (attachments.length) msg.attachments = attachments.map(sanitizeAttachment).filter(Boolean);
       if (kind) msg.kind = kind;
       conv.messages.push(msg);
       if (conv.messages.length > LIMITS.maxMessagesPerConversation) conv.messages.splice(0, conv.messages.length - LIMITS.maxMessagesPerConversation);
@@ -84,7 +119,13 @@ export function createStore(storage) {
     updateMessage(convId, msgId, patch) {
       const msg = find(convId)?.messages.find((m) => m.id === msgId);
       if (!msg) return null;
-      Object.assign(msg, patch);
+      const next = { ...patch };
+      if (Array.isArray(next.attachments)) {
+        const cleaned = next.attachments.map(sanitizeAttachment).filter(Boolean);
+        if (cleaned.length) next.attachments = cleaned;
+        else delete next.attachments;
+      }
+      Object.assign(msg, next);
       save();
       return msg;
     },

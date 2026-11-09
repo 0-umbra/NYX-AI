@@ -7,6 +7,9 @@ import { build } from 'esbuild';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'www');
 const ENTRIES = ['index.html', 'manifest.webmanifest', 'src'];
+// The PDF.js worker (for on-device PDF text extraction / scanned-PDF page rendering) is
+// vendored so the app keeps working fully offline inside the Android WebView.
+const PDF_WORKER = path.join('node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.worker.min.mjs');
 
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
@@ -14,6 +17,9 @@ await mkdir(OUT, { recursive: true });
 for (const entry of ENTRIES) {
   await cp(path.join(ROOT, entry), path.join(OUT, entry), { recursive: true });
 }
+
+await mkdir(path.join(OUT, 'vendor'), { recursive: true });
+await cp(path.join(ROOT, PDF_WORKER), path.join(OUT, 'vendor', 'pdf.worker.min.mjs'));
 
 await build({
   absWorkingDir: ROOT,
