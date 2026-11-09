@@ -49,6 +49,13 @@ jobs:
           fi
           # Clean up backup
           rm -rf android_incomplete_backup
+          # CI CORRECTION: Change distribution from "gradle-8.11.1-all.zip" to "gradle-8.11.1-bin.zip"
+          # and set networkTimeout to "120000" milliseconds in the generated wrapper properties.
+          # Apply after "npx cap add android" and before "./gradlew assembleDebug".
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i 's|distributionUrl=https://services.gradle.org/distributions/gradle-8.11.1-all.zip|distributionUrl=https://services.gradle.org/distributions/gradle-8.11.1-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
+            sed -i 's|networkTimeout=10000|networkTimeout=120000|g' android/gradle/wrapper/gradle-wrapper.properties
+          fi
       - run: npx cap sync android
       # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark-512.png)
       # and written into the Android resource tree. This step generates it and verifies it, and it
