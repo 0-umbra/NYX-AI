@@ -89,8 +89,9 @@ after(async () => { await browser?.close(); server?.close(); await rm(workDir, {
 async function openPage({ width = 360, height = 780, mobile = true, signedOut = false } = {}) {
   await ctx?.close();
   ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, permissions: ['clipboard-read', 'clipboard-write'] });
-  // Idempotent seeding: a later updateProfile() must survive page.reload(), like the real SDK session.
-  if (!signedOut) await ctx.addInitScript(() => { if (!localStorage.getItem('__nyxE2eAuth')) localStorage.setItem('__nyxE2eAuth', JSON.stringify({ email: 'tester@example.com' })); });
+  // Idempotent seeding: a later updateProfile() must survive page.reload(), like the real SDK
+  // session. Wrapped in try/catch — opaque origins (about:blank) deny localStorage access.
+  if (!signedOut) await ctx.addInitScript(() => { try { if (!localStorage.getItem('__nyxE2eAuth')) localStorage.setItem('__nyxE2eAuth', JSON.stringify({ email: 'tester@example.com' })); } catch { /* opaque origin */ } });
   page = await ctx.newPage();
   problems = [];
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') problems.push(`console.${m.type()}: ${m.text()}`); });
@@ -221,6 +222,7 @@ test('sidebar: search filters, shows empty states, and delete asks for confirmat
   await send('Alpha plan');
   await page.click('#new-chat-btn');
   await send('Beta notes');
+  await settle(); // the conversation list re-renders when the reply lands — wait so the open menu stays put
   await page.click('#menu-btn');
   await page.fill('#sidebar-search', 'alpha');
   assert.deepEqual(await page.$$eval('.conv-open', (b) => b.map((x) => x.textContent)), ['Alpha plan']);
