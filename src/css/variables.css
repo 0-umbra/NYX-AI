@@ -1,49 +1,90 @@
-/* NYX AI — design tokens. Every colour, radius and duration used elsewhere comes from here. */
+/* NYX AI — design tokens.
+ * Every colour, elevation and radii value used by components comes from these tokens.
+ * Three intentional themes (Pure Black / Deep Night / Light) × two accents (Violet / Steel Blue)
+ * resolve the same semantic token set, so components never hardcode a colour.
+ *
+ * Cascade order matters: the bare [data-accent] override must come before the theme blocks,
+ * and each theme × accent combination that needs a different accent re-declares it explicitly.
+ * WCAG contrast for text and interactive pairs is enforced by tests/unit/theme.test.js.
+ */
+
+/* ── Pure Black (OLED) — default ─────────────────────────── */
 :root {
-  /* Surfaces (pure black base for OLED screens) */
+  color-scheme: dark;
+
+  /* Surfaces */
   --bg: #000000;
-  --bg-raised: #08080f;
-  --surface: #0e0e18;
-  --surface-2: #151524;
-  --surface-3: #1e1e32;
-  --line: rgba(255, 255, 255, 0.08);
-  --line-strong: rgba(255, 255, 255, 0.18);
+  --bg-raised: #0b0b0e;
+  --surface: #131316;
+  --surface-2: #1b1b20;
+  --surface-3: #26262c;
+  --overlay: rgba(0, 0, 0, 0.6);
+
+  /* Hairlines */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.14);
 
   /* Text */
-  --text: #f2f2fa;
-  --text-2: #b0b1c9;
-  --text-3: #8486a3;
+  --text: #f4f4f6;
+  --text-2: #a3a3ac;
+  --text-3: #73737e;
 
-  /* Brand */
+  /* Brand (fixed product identity) */
   --violet: #8b5cf6;
-  --violet-deep: #6d28d9;
-  --blue: #3b82f6;
-  --blue-deep: #2563eb;
+  --violet-deep: #7c3aed;
+  --blue: #82a9de;
+  --blue-deep: #4370b5;
 
-  /* Active accent (swapped by [data-accent]) */
+  /* Active accent (steel-blue set lives in [data-accent="blue"] below) */
   --accent: var(--violet);
   --accent-deep: var(--violet-deep);
+  --accent-deep-2: #6d28d9;
   --accent-2: var(--blue);
   --accent-text: #a78bfa;
-  --accent-soft: rgba(139, 92, 246, 0.16);
-  --accent-line: rgba(139, 92, 246, 0.5);
-  --accent-glow: 0 0 28px rgba(139, 92, 246, 0.32);
-  --gradient: linear-gradient(135deg, var(--violet-deep), var(--blue-deep));
-  --glow-a: rgba(109, 40, 217, 0.26);
-  --glow-b: rgba(37, 99, 235, 0.14);
-  --bubble-user: rgba(109, 40, 217, 0.34);
+  --accent-soft: rgba(139, 92, 246, 0.14);
+  --accent-line: rgba(139, 92, 246, 0.42);
+  --accent-ring: rgba(139, 92, 246, 0.3);
+  --on-accent: #ffffff;
+  --gradient: linear-gradient(135deg, var(--accent-deep), var(--accent-deep-2));
+  --bubble-user: rgba(124, 58, 237, 0.26);
+  --bubble-user-line: rgba(139, 92, 246, 0.38);
 
   /* Status */
   --danger: #f87171;
-  --danger-soft: rgba(248, 113, 113, 0.14);
-  --ok: #34d399;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --danger-line: rgba(248, 113, 113, 0.35);
   --warn: #fbbf24;
+  --warn-text: #fcd34d;
+  --warn-soft: rgba(251, 191, 36, 0.08);
+  --warn-line: rgba(251, 191, 36, 0.32);
+  --ok: #34d399;
+
+  /* Elevation — on dark surfaces shadows stay subtle; borders do most of the work */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 10px 32px rgba(0, 0, 0, 0.55);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.65);
+
+  /* Ambient washes: a restrained hint of brand at the top of the chat canvas only */
+  --ambient-a: rgba(124, 58, 237, 0.07);
+  --ambient-b: rgba(72, 120, 195, 0.045);
+  --welcome-halo: radial-gradient(circle, rgba(139, 92, 246, 0.16) 0%, rgba(82, 122, 195, 0.08) 46%, transparent 70%);
+
+  /* Code surfaces and syntax tokens */
+  --code-bg: #0a0a0d;
+  --code-head-bg: var(--surface-2);
+  --code-line: var(--line);
+  --code-text: #d9d9e0;
+  --tok-c: #7a7c94;
+  --tok-s: #7ee0a3;
+  --tok-k: #c4b5fd;
+  --tok-f: #8ec9fb;
+  --tok-n: #f5c76f;
 
   /* Shape */
   --radius-s: 10px;
   --radius-m: 14px;
-  --radius-l: 20px;
-  --radius-xl: 26px;
+  --radius-l: 18px;
+  --radius-xl: 24px;
   --radius-pill: 999px;
 
   /* Type */
@@ -63,29 +104,167 @@
   --safe-left: env(safe-area-inset-left, 0px);
 }
 
-:root[data-theme="night"] {
-  --bg: #05050d;
-  --bg-raised: #0a0a15;
-  --surface: #11111f;
-  --surface-2: #181829;
-  --surface-3: #212139;
-}
-
+/* Steel-blue accent on Pure Black */
 :root[data-accent="blue"] {
   --accent: var(--blue);
   --accent-deep: var(--blue-deep);
+  --accent-deep-2: #3a62a3;
   --accent-2: var(--violet);
-  --accent-text: #93c5fd;
-  --accent-soft: rgba(59, 130, 246, 0.16);
-  --accent-line: rgba(59, 130, 246, 0.5);
-  --accent-glow: 0 0 28px rgba(59, 130, 246, 0.32);
-  --gradient: linear-gradient(135deg, var(--blue-deep), var(--violet-deep));
-  --glow-a: rgba(37, 99, 235, 0.24);
-  --glow-b: rgba(109, 40, 217, 0.14);
-  --bubble-user: rgba(37, 99, 235, 0.34);
+  --accent-text: #9fc1ec;
+  --accent-soft: rgba(148, 184, 232, 0.14);
+  --accent-line: rgba(148, 184, 232, 0.42);
+  --accent-ring: rgba(148, 184, 232, 0.3);
+  --bubble-user: rgba(67, 112, 181, 0.3);
+  --bubble-user-line: rgba(148, 184, 232, 0.36);
+  --ambient-a: rgba(67, 112, 181, 0.08);
+  --ambient-b: rgba(124, 58, 237, 0.045);
+  --welcome-halo: radial-gradient(circle, rgba(130, 169, 222, 0.15) 0%, rgba(139, 92, 246, 0.07) 46%, transparent 70%);
 }
 
+/* ── Deep Night — premium dark graphite ──────────────────── */
+:root[data-theme="night"] {
+  --bg: #111318;
+  --bg-raised: #171a20;
+  --surface: #20232b;
+  --surface-2: #282c36;
+  --surface-3: #333845;
+  --overlay: rgba(4, 5, 8, 0.58);
+
+  --line: rgba(148, 163, 184, 0.12);
+  --line-strong: rgba(148, 163, 184, 0.2);
+
+  --text: #f0f0f2;
+  --text-2: #b4b9c5;
+  --text-3: #8a90a1;
+
+  /* Muted violet + slate, per the brand spec */
+  --violet: #a99ae8;
+  --violet-deep: #7363c9;
+  --blue: #83a6c9;
+  --blue-deep: #56769c;
+
+  --accent: var(--violet);
+  --accent-deep: var(--violet-deep);
+  --accent-deep-2: #6457b8;
+  --accent-2: var(--blue);
+  --accent-text: #a99ae8;
+  --accent-soft: rgba(169, 154, 232, 0.15);
+  --accent-line: rgba(169, 154, 232, 0.45);
+  --accent-ring: rgba(169, 154, 232, 0.32);
+  --bubble-user: rgba(115, 99, 201, 0.3);
+  --bubble-user-line: rgba(169, 154, 232, 0.35);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 24px 60px rgba(0, 0, 0, 0.55);
+
+  --ambient-a: rgba(115, 99, 201, 0.09);
+  --ambient-b: rgba(86, 118, 156, 0.06);
+  --welcome-halo: radial-gradient(circle, rgba(169, 154, 232, 0.15) 0%, rgba(131, 166, 201, 0.07) 46%, transparent 70%);
+
+  --code-bg: #161922;
+  --code-head-bg: #20242e;
+  --code-text: #d7dae3;
+}
+
+:root[data-theme="night"][data-accent="blue"] {
+  --accent: var(--blue);
+  --accent-deep: var(--blue-deep);
+  --accent-deep-2: #4c688a;
+  --accent-2: var(--violet);
+  --accent-text: #9ab8d8;
+  --accent-soft: rgba(131, 166, 201, 0.15);
+  --accent-line: rgba(131, 166, 201, 0.45);
+  --accent-ring: rgba(131, 166, 201, 0.32);
+  --bubble-user: rgba(86, 118, 156, 0.34);
+  --bubble-user-line: rgba(131, 166, 201, 0.35);
+  --ambient-a: rgba(86, 118, 156, 0.1);
+  --ambient-b: rgba(115, 99, 201, 0.06);
+  --welcome-halo: radial-gradient(circle, rgba(131, 166, 201, 0.14) 0%, rgba(169, 154, 232, 0.07) 46%, transparent 70%);
+}
+
+/* ── Light — professional bright theme ───────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f5f6f8;
+  --bg-raised: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #eceef2;
+  --surface-3: #dfe3ea;
+  --overlay: rgba(23, 25, 35, 0.4);
+
+  --line: rgba(23, 25, 35, 0.08);
+  --line-strong: rgba(23, 25, 35, 0.16);
+
+  --text: #171923;
+  --text-2: #565b6a;
+  --text-3: #7d8494;
+
+  /* Deeper, readable violet + professional steel blue */
+  --violet: #6d28d9;
+  --violet-deep: #6d28d9;
+  --blue: #3e6284;
+  --blue-deep: #3e6284;
+
+  --accent: var(--violet);
+  --accent-deep: var(--violet-deep);
+  --accent-deep-2: #5b21b6;
+  --accent-2: var(--blue);
+  --accent-text: #6d28d9;
+  --accent-soft: rgba(109, 40, 217, 0.09);
+  --accent-line: rgba(109, 40, 217, 0.5);
+  --accent-ring: rgba(109, 40, 217, 0.18);
+  --bubble-user: #eae3fc;
+  --bubble-user-line: rgba(109, 40, 217, 0.35);
+
+  --danger: #c92a20;
+  --danger-soft: rgba(201, 42, 32, 0.08);
+  --danger-line: rgba(201, 42, 32, 0.3);
+  --warn: #92680a;
+  --warn-text: #92400e;
+  --warn-soft: rgba(180, 83, 9, 0.1);
+  --warn-line: rgba(180, 83, 9, 0.35);
+  --ok: #047857;
+
+  /* Real elevation: light themes carry depth with soft shadows */
+  --shadow-1: 0 1px 2px rgba(16, 18, 27, 0.05), 0 1px 3px rgba(16, 18, 27, 0.07);
+  --shadow-2: 0 10px 30px rgba(16, 18, 27, 0.12);
+  --shadow-3: 0 24px 60px rgba(16, 18, 27, 0.16);
+
+  /* Bright themes stay calm: a barely-there cool wash, no visible gradient band */
+  --ambient-a: rgba(109, 40, 217, 0.03);
+  --ambient-b: rgba(62, 98, 132, 0.02);
+  --welcome-halo: radial-gradient(circle, rgba(109, 40, 217, 0.1) 0%, rgba(62, 98, 132, 0.05) 46%, transparent 70%);
+
+  --code-bg: #eff1f6;
+  --code-head-bg: #e5e7ee;
+  --code-line: var(--line-strong);
+  --code-text: #23283c;
+  --tok-c: #818898;
+  --tok-s: #116632;
+  --tok-k: #7c2dbd;
+  --tok-f: #2c5f94;
+  --tok-n: #8a4f0e;
+}
+
+:root[data-theme="light"][data-accent="blue"] {
+  --accent: var(--blue);
+  --accent-deep: var(--blue-deep);
+  --accent-deep-2: #345271;
+  --accent-2: var(--violet);
+  --accent-text: #3e6284;
+  --accent-soft: rgba(62, 98, 132, 0.09);
+  --accent-line: rgba(62, 98, 132, 0.5);
+  --accent-ring: rgba(62, 98, 132, 0.18);
+  --bubble-user: #e3e9f0;
+  --bubble-user-line: rgba(62, 98, 132, 0.35);
+  --ambient-a: rgba(62, 98, 132, 0.035);
+  --ambient-b: rgba(109, 40, 217, 0.02);
+  --welcome-halo: radial-gradient(circle, rgba(62, 98, 132, 0.1) 0%, rgba(109, 40, 217, 0.05) 46%, transparent 70%);
+}
+
+/* Text size and motion preferences (orthogonal to theme) */
 :root[data-text="sm"] { --fs-base: 15px; }
 :root[data-text="lg"] { --fs-base: 18px; }
-
 :root[data-motion="reduce"] { --dur: 0.01ms; }

@@ -1,0 +1,79 @@
+# Browser end-to-end tests. Runs the full unit suite and production build first, then drives
+# the real app (bundled for the browser exactly like the Capacitor build, with Firebase
+# aliased to local stubs and the Worker /chat endpoint intercepted) in headless Chromium.
+# A per-theme screenshot set ("theme visual audit") is uploaded as an artifact for review.
+name: E2E (Playwright)
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, 'arena/**']
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write # lets the job post its result excerpt back to the PR
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        # Playwright is an optional, no-save test dependency (kept out of package.json on purpose,
+        # see the header of tests/e2e/ui.test.mjs — heavy browser download, not needed on devices).
+      - run: npm i --no-save playwright
+      - run: npx playwright install --with-deps chromium
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Browser e2e suite (all themes)
+        id: e2e
+        run: |
+          set -o pipefail
+          npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e-output.txt"
+        env:
+          NYX_E2E_SHOTS_DIR: ${{ runner.temp }}/nyx-e2e-shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nyx-theme-visual-audit-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/nyx-e2e-shots
+            ${{ runner.temp }}/e2e-output.txt
+          if-no-files-found: warn
+      - name: Publish the result excerpt to the PR and the run summary
+        if: always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/arena/'))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          SUMMARY=$(grep -E '^# (tests|pass|fail) ' "$RUNNER_TEMP/e2e-output.txt" | tr '\n' ' ' || true)
+          {
+            echo "### E2E (Playwright) — ${{ steps.e2e.outcome }} (run ${{ github.run_number }})"
+            echo ''
+            echo "> ${SUMMARY:-no TAP summary found}"
+            echo ''
+            if grep -q 'not ok' "$RUNNER_TEMP/e2e-output.txt"; then
+              echo '**Failing tests:**'
+              echo ''
+              grep 'not ok' "$RUNNER_TEMP/e2e-output.txt" | sed 's/^/- /' | head -40
+              echo ''
+              echo '<details><summary>TAP excerpt</summary>'
+              echo ''
+              echo '```'
+              grep -A 22 'not ok [0-9]' "$RUNNER_TEMP/e2e-output.txt" | head -c 55000 || true
+              echo '```'
+              echo '</details>'
+            fi
+            echo ''
+            echo 'Full log: run artifacts (this run) → `e2e-output.txt`; screenshots → `nyx-theme-visual-audit-*`.'
+          } | tee "$RUNNER_TEMP/e2e-comment.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$PR_NUMBER" ]; then PR_NUMBER=$(gh pr list --head "$HEAD_BRANCH" --state open --json number --jq '.[0].number' || true); fi
+          if [ -n "$PR_NUMBER" ]; then gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/e2e-comment.md" --edit-last --create-if-none || true; fi

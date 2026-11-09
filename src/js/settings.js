@@ -7,8 +7,10 @@ export const DEFAULT_PREFS = Object.freeze({
   theme: 'black', accent: 'violet', textSize: 'md', reduceMotion: false, displayName: '',
   memory: Object.freeze({ enabled: true, useHistory: true, autoSave: false }),
 });
-const ENUMS = { theme: ['black', 'night'], accent: ['violet', 'blue'], textSize: ['sm', 'md', 'lg'] };
-const THEME_COLOR = { black: '#000000', night: '#05050d' };
+const ENUMS = { theme: ['black', 'night', 'light'], accent: ['violet', 'blue'], textSize: ['sm', 'md', 'lg'] };
+/** Display names and the browser chrome colour (status bar / task switcher) for each theme. */
+export const THEME_LABELS = Object.freeze({ black: 'Pure Black', night: 'Deep Night', light: 'Light' });
+export const THEME_COLOR = Object.freeze({ black: '#000000', night: '#111318', light: '#f5f6f8' });
 
 export function normalizePrefs(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -54,7 +56,8 @@ export function applyPrefs(p, root = document.documentElement) {
   root.dataset.accent = p.accent;
   root.dataset.text = p.textSize;
   root.dataset.motion = p.reduceMotion ? 'reduce' : 'full';
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_COLOR[p.theme] ?? '#000000');
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', THEME_COLOR[p.theme] ?? '#000000');
 }
 
 const PREVIEW = [
@@ -96,6 +99,7 @@ export function initSettings({ prefs, store, storage }) {
     applyPrefs(p);
     groups.forEach(({ el, ctl }) => ctl.set(p[el.dataset.pref]));
     switches.forEach((sw) => sw.setAttribute('aria-checked', String(Boolean(prefs.get(sw.dataset.switch)))));
+    $('theme-note').textContent = `${THEME_LABELS[p.theme]} theme is active`;
     const name = p.displayName || 'Guest';
     const initial = (Array.from(name)[0] || 'G').toUpperCase();
     ['profile-name', 'acct-name'].forEach((id) => { $(id).textContent = name; });

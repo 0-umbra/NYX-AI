@@ -284,6 +284,72 @@ test('reload: the open conversation is restored and follow-ups keep their contex
   }
 });
 
+test('theme: a saved appearance is restored at boot with the right browser chrome', async () => {
+  const app = await boot({
+    seed: { 'nyx.prefs': JSON.stringify({ theme: 'light', accent: 'blue', textSize: 'lg', reduceMotion: true }) },
+  });
+  try {
+    app.stage('boot with a saved Light theme');
+    const d = { ...app.window.document.documentElement.dataset };
+    assert.deepEqual(d, { theme: 'light', accent: 'blue', text: 'lg', motion: 'reduce' }, 'the saved appearance is restored');
+    assert.equal(
+      app.window.document.querySelector('meta[name="theme-color"]').content, '#f5f6f8',
+      'the Light theme drives the browser chrome colour',
+    );
+  } finally {
+    app.dom.window.close();
+  }
+});
+
+test('theme: switching theme in Appearance persists through a full app restart', async () => {
+  const first = await boot();
+  let seed;
+  try {
+    await first.signIn();
+    first.window.document.querySelector('[data-pref="theme"] [data-value="night"]').click();
+    first.stage('after picking Deep Night');
+    assert.equal(first.window.NYX.prefs.get('theme'), 'night');
+    assert.equal(first.window.document.documentElement.dataset.theme, 'night');
+    assert.match(first.window.document.getElementById('theme-note').textContent, /Deep Night/);
+    seed = first.storage();
+  } finally {
+    first.dom.window.close();
+  }
+
+  // A new document sharing the same device storage = closing and reopening the app.
+  const second = await boot({ seed });
+  try {
+    await second.signIn();
+    second.stage('after restart');
+    assert.equal(second.window.NYX.prefs.get('theme'), 'night', 'the theme choice survives restart');
+    assert.equal(second.window.document.documentElement.dataset.theme, 'night');
+    const checked = second.window.document.querySelector('[data-pref="theme"] [aria-checked="true"]');
+    assert.equal(checked?.dataset.value, 'night', 'the picker reflects the restored theme');
+  } finally {
+    second.dom.window.close();
+  }
+});
+
+test('theme: every picker option applies, persists and never resets chats or sign-in', async () => {
+  const app = await boot();
+  try {
+    await app.signIn();
+    app.setTransport(async function* transport() { yield 'theme check'; });
+    await app.send('keep this chat');
+    app.stage('after chat setup');
+    for (const theme of ['light', 'night', 'black']) {
+      app.window.document.querySelector(`[data-pref="theme"] [data-value="${theme}"]`).click();
+      assert.equal(app.window.document.documentElement.dataset.theme, theme);
+      assert.equal(app.window.NYX.prefs.get('theme'), theme);
+      assert.equal(app.window.NYX.store.count(), 1, 'theme switch keeps conversations');
+      assert.equal(app.window.document.getElementById('app').hidden, false, 'theme switch keeps the session');
+    }
+    app.stage('after cycling all themes');
+  } finally {
+    app.dom.window.close();
+  }
+});
+
 test('transport failure: a rejected request is reported in the conversation, not as a global error', async () => {
   const app = await boot();
   try {
