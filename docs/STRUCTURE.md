@@ -12,7 +12,7 @@ NYX-AI/
 ├── README.md                        Usage, layouts, Termux/Android steps, integration plan, limitations
 ├── src/
 │   ├── css/
-│   │   ├── variables.css       91   Design tokens, themes (black/night), accents (violet/blue), text sizes, motion
+│   │   ├── variables.css      200+  Design tokens; three themes (Pure Black / Deep Night / Light) × accents (violet/steel blue), text sizes, motion
 │   │   ├── base.css            60   Reset, typography, focus ring, reduced-motion rules
 │   │   ├── layout.css          96   App shell, top bar, drawer → icon rail → expanded sidebar, chat/composer layout
 │   │   └── components.css     318   Buttons, chips, welcome + suggestion cards, bubbles, Markdown, composer, dialogs, settings

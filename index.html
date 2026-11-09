@@ -4,9 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#000000">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <meta name="description" content="NYX AI — Intelligence beyond limits.">
   <title>NYX AI</title>
+  <script>
+    /* Applies the saved appearance before first paint so reopening the app never
+       flashes the wrong theme. Mirrors the enumerations in src/js/settings.js. */
+    (function () {
+      var root = document.documentElement;
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem('nyx.prefs') || 'null'); } catch (err) { saved = null; }
+      if (!saved || typeof saved !== 'object') return;
+      if (['black', 'night', 'light'].indexOf(saved.theme) !== -1) root.dataset.theme = saved.theme;
+      if (['violet', 'blue'].indexOf(saved.accent) !== -1) root.dataset.accent = saved.accent;
+      if (['sm', 'md', 'lg'].indexOf(saved.textSize) !== -1) root.dataset.text = saved.textSize;
+      if (saved.reduceMotion === true) root.dataset.motion = 'reduce';
+      var themeColors = { black: '#000000', night: '#111318', light: '#f5f6f8' };
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', themeColors[root.dataset.theme] || '#000000');
+    })();
+  </script>
   <link rel="icon" type="image/png" href="src/assets/logo/nyx-mark.png">
   <link rel="apple-touch-icon" href="src/assets/icons/icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
@@ -178,10 +195,27 @@
         <div class="scroll"><div class="page">
           <div class="group">
             <div class="field-row stack"><span class="field-label" id="lbl-theme">Theme</span>
-              <div class="segmented" role="radiogroup" aria-labelledby="lbl-theme" data-pref="theme">
-                <button type="button" role="radio" aria-checked="true" data-value="black">Pure black</button>
-                <button type="button" role="radio" aria-checked="false" data-value="night">Deep night</button>
-              </div></div>
+              <div class="theme-picker" role="radiogroup" aria-labelledby="lbl-theme" data-pref="theme">
+                <button type="button" class="theme-option" role="radio" aria-checked="true" data-value="black">
+                  <span class="theme-preview" data-swatch="black" aria-hidden="true"><span class="tp-chrome"></span><span class="tp-body"><span class="tp-row"></span><span class="tp-row tp-row-accent"></span></span></span>
+                  <span class="theme-name">Pure Black</span>
+                  <span class="theme-desc">True black for OLED screens</span>
+                  <span class="theme-check" aria-hidden="true"><svg class="i" aria-hidden="true"><use href="#i-check"></use></svg></span>
+                </button>
+                <button type="button" class="theme-option" role="radio" aria-checked="false" data-value="night">
+                  <span class="theme-preview" data-swatch="night" aria-hidden="true"><span class="tp-chrome"></span><span class="tp-body"><span class="tp-row"></span><span class="tp-row tp-row-accent"></span></span></span>
+                  <span class="theme-name">Deep Night</span>
+                  <span class="theme-desc">Premium dark graphite</span>
+                  <span class="theme-check" aria-hidden="true"><svg class="i" aria-hidden="true"><use href="#i-check"></use></svg></span>
+                </button>
+                <button type="button" class="theme-option" role="radio" aria-checked="false" data-value="light">
+                  <span class="theme-preview" data-swatch="light" aria-hidden="true"><span class="tp-chrome"></span><span class="tp-body"><span class="tp-row"></span><span class="tp-row tp-row-accent"></span></span></span>
+                  <span class="theme-name">Light</span>
+                  <span class="theme-desc">Bright professional surfaces</span>
+                  <span class="theme-check" aria-hidden="true"><svg class="i" aria-hidden="true"><use href="#i-check"></use></svg></span>
+                </button>
+              </div>
+              <span class="row-sub" id="theme-note">Pure Black is active</span></div>
             <div class="field-row stack"><span class="field-label" id="lbl-accent">Accent colour</span>
               <div class="segmented" role="radiogroup" aria-labelledby="lbl-accent" data-pref="accent">
                 <button type="button" role="radio" aria-checked="true" data-value="violet"><span class="swatch swatch-violet"></span>Violet</button>

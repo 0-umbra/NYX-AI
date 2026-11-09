@@ -1,9 +1,10 @@
+/* Reset and shared primitives. All colours come from variables.css tokens. */
+
 *, *::before, *::after { box-sizing: border-box; }
 
 html {
   height: 100%;
   background: var(--bg);
-  color-scheme: dark;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
@@ -31,7 +32,7 @@ a { color: var(--accent-text); }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
 h1:focus { outline: none; }
-::selection { background: var(--accent-line); }
+::selection { background: var(--accent-soft); color: var(--text); }
 
 [hidden] { display: none !important; }
 

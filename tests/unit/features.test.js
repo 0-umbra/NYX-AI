@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { initAuth } from '../../src/js/auth.js';
 import { initModels } from '../../src/js/models.js';
+import { initSettings, createPrefs, THEME_COLOR, THEME_LABELS } from '../../src/js/settings.js';
 import { initSidebar } from '../../src/js/sidebar.js';
 import { createStore } from '../../src/js/store.js';
 import { createStorage } from '../../src/js/storage.js';
@@ -139,5 +140,34 @@ test('chat reveals markdown progressively, cancels safely when switching and kee
   assert.ok(document.querySelector('.msg-body pre code'));
   chat.open(first); assert.equal(document.querySelector('.msg-user').textContent.trim(), 'first');
   chat.open(second); assert.equal(store.get(second).messages[0].content, 'second');
+  dom.window.close();
+});
+
+test('appearance screen: the theme picker applies, annotates and persists all three themes', () => {
+  const dom = setup();
+  const storage = createStorage(dom.window.localStorage);
+  const store = createStore(storage);
+  const prefs = createPrefs(storage);
+  initSettings({ prefs, store, storage });
+
+  // Default state: Pure Black, clearly displayed.
+  assert.equal(document.querySelector('[data-pref="theme"] [aria-checked="true"]').dataset.value, 'black');
+  assert.match(document.getElementById('theme-note').textContent, /Pure Black/);
+
+  for (const theme of ['light', 'night', 'black']) {
+    document.querySelector(`[data-pref="theme"] [data-value="${theme}"]`).click();
+    assert.equal(prefs.get('theme'), theme);
+    assert.equal(document.documentElement.dataset.theme, theme, `${theme} applies instantly`);
+    assert.equal(document.querySelector(`[data-pref="theme"] [data-value="${theme}"]`).getAttribute('aria-checked'), 'true');
+    assert.match(document.getElementById('theme-note').textContent, new RegExp(THEME_LABELS[theme]), 'the picker names the active theme');
+    assert.equal(document.querySelector('meta[name="theme-color"]').content, THEME_COLOR[theme], `${theme} drives browser chrome`);
+    assert.equal(createPrefs(storage).get('theme'), theme, `${theme} is saved on this device`);
+  }
+
+  // Accent and text-size radios keep working next to the new picker.
+  document.querySelector('[data-pref="accent"] [data-value="blue"]').click();
+  assert.equal(document.documentElement.dataset.accent, 'blue');
+  document.querySelector('[data-pref="textSize"] [data-value="lg"]').click();
+  assert.equal(document.documentElement.dataset.text, 'lg');
   dom.window.close();
 });
