@@ -48,10 +48,11 @@ jobs:
             ${{ runner.temp }}/e2e-output.txt
           if-no-files-found: warn
       - name: Publish the result excerpt to the PR and the run summary
-        if: always() && github.event_name == 'pull_request'
+        if: always() && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/arena/'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           SUMMARY=$(grep -E '^# (tests|pass|fail) ' "$RUNNER_TEMP/e2e-output.txt" | tr '\n' ' ' || true)
           {
@@ -74,4 +75,5 @@ jobs:
             echo ''
             echo 'Full log: run artifacts (this run) → `e2e-output.txt`; screenshots → `nyx-theme-visual-audit-*`.'
           } | tee "$RUNNER_TEMP/e2e-comment.md" >> "$GITHUB_STEP_SUMMARY"
-          gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/e2e-comment.md" --edit-last --create-if-none || true
+          if [ -z "$PR_NUMBER" ]; then PR_NUMBER=$(gh pr list --head "$HEAD_BRANCH" --state open --json number --jq '.[0].number' || true); fi
+          if [ -n "$PR_NUMBER" ]; then gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/e2e-comment.md" --edit-last --create-if-none || true; fi
