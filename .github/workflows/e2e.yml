@@ -14,6 +14,10 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write # lets the job post its result excerpt back to the PR
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,12 +33,39 @@ jobs:
       - name: Production build
         run: npm run build
       - name: Browser e2e suite (all themes)
-        run: npm run test:e2e
+        id: e2e
+        run: npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e-output.txt"
         env:
           NYX_E2E_SHOTS_DIR: ${{ runner.temp }}/nyx-e2e-shots
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: nyx-theme-visual-audit-${{ github.run_number }}
-          path: ${{ runner.temp }}/nyx-e2e-shots
+          path: |
+            ${{ runner.temp }}/nyx-e2e-shots
+            ${{ runner.temp }}/e2e-output.txt
           if-no-files-found: warn
+      - name: Publish the result excerpt to the PR and the run summary
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          SUMMARY=$(grep -E '^# (tests|pass|fail) ' "$RUNNER_TEMP/e2e-output.txt" | paste -sd' · ' - || true)
+          {
+            echo "### E2E (Playwright) — ${{ steps.e2e.outcome }} (run ${{ github.run_number }})"
+            echo ''
+            echo "> ${SUMMARY:-no TAP summary found}"
+            echo ''
+            if [ "${{ steps.e2e.outcome }}" != "success" ]; then
+              echo '<details><summary>Failing tests (TAP excerpt)</summary>'
+              echo ''
+              echo '```'
+              grep -A 22 'not ok [0-9]' "$RUNNER_TEMP/e2e-output.txt" | head -c 55000 || true
+              echo '```'
+              echo '</details>'
+            fi
+            echo ''
+            echo 'Full log: run artifacts (this run) → `e2e-output.txt`; screenshots → `nyx-theme-visual-audit-*`.'
+          } | tee "$RUNNER_TEMP/e2e-comment.md" >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/e2e-comment.md" --edit-last --create-if-none || true
