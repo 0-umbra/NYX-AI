@@ -26,11 +26,13 @@ test('package.json: no frameworks and only Capacitor dependencies', () => {
   const deps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
   assert.ok(deps.length > 0);
   for (const d of deps) assert.ok(
-    /^@capacitor\//.test(d) || d === 'firebase' || d === 'esbuild' || d === 'jsdom',
+    /^@capacitor\//.test(d) || d === 'firebase' || d === 'esbuild' || d === 'jsdom' || d === 'sharp',
     `unexpected dependency ${d}`
   );
   assert.ok(pkg.devDependencies.esbuild, 'esbuild must remain a development dependency');
   assert.ok(!pkg.dependencies.esbuild, 'esbuild must not be a runtime dependency');
+  // Sharp is intentionally used for logo/icon image processing in Phase 2A
+  assert.ok(pkg.dependencies.sharp || pkg.devDependencies.sharp, 'sharp must be present for image processing');
   for (const bad of ['react', 'vue', 'angular', 'jquery', 'svelte', 'express']) assert.ok(!deps.includes(bad));
 });
 
