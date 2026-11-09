@@ -19,9 +19,10 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run build
-      - run: npx cap add android        # remove this line once android/ is committed
+      # The Android platform already exists in the repository (android/).
+      # Skip "npx cap add android" and proceed directly to sync.
       - run: npx cap sync android
-      # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark.png)
+      # The Android launcher icon is derived from the official logo (src/assets/logo/nyx-mark-512.png)
       # and written into the Android resource tree. This step generates it and verifies it, and it
       # fails the build if any required variant is missing, malformed or not the NYX AI mark, so a
       # broken icon can never be packaged into the APK. Run it after `cap sync`, which may rewrite
