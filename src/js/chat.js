@@ -286,7 +286,7 @@ export function initChat({ store, getModelId, storage = null }) {
       }
     } finally {
       if (abort === controller) abort = null;
-      if (attachmentResults && wireMap?.length && composerEntries?.length) {
+      if (attachmentResults && wireMap?.length && composerEntries?.userMessageId && Array.isArray(composerEntries?.entries)) {
         const userMessageId = composerEntries.userMessageId;
         if (userMessageId) {
           const merged = mergeAnalyses(composerEntries.entries, wireMap, attachmentResults)
