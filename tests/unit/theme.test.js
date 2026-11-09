@@ -103,6 +103,16 @@ function over(fgRaw, bgRaw) {
 
 // ── Token completeness and contrast ─────────────────────────────────────────
 
+test('Deep Night palette: the approved brand values are pinned exactly', () => {
+  const tokens = resolveTokens('night', 'violet');
+  assert.equal(tokens.value('bg'), '#111318', 'graphite background');
+  assert.equal(tokens.value('surface'), '#20232b', 'charcoal surfaces');
+  assert.equal(tokens.value('violet'), '#a99ae8', 'muted violet');
+  assert.equal(tokens.value('accent'), '#a99ae8', 'muted violet is the violet accent');
+  assert.equal(tokens.value('blue'), '#83a6c9', 'steel blue');
+  assert.equal(tokens.value('text'), '#f0f0f2', 'soft white text');
+});
+
 test('theme tokens: every theme × accent combination resolves the full semantic set', () => {
   for (const theme of THEMES) {
     for (const accent of ACCENTS) {

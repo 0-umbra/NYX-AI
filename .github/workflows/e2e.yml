@@ -1,0 +1,40 @@
+# Browser end-to-end tests. Runs the full unit suite and production build first, then drives
+# the real app (bundled for the browser exactly like the Capacitor build, with Firebase
+# aliased to local stubs and the Worker /chat endpoint intercepted) in headless Chromium.
+# A per-theme screenshot set ("theme visual audit") is uploaded as an artifact for review.
+name: E2E (Playwright)
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, 'arena/**']
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        # Playwright is an optional, no-save test dependency (kept out of package.json on purpose,
+        # see the header of tests/e2e/ui.test.mjs — heavy browser download, not needed on devices).
+      - run: npm i --no-save playwright
+      - run: npx playwright install --with-deps chromium
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Browser e2e suite (all themes)
+        run: npm run test:e2e
+        env:
+          NYX_E2E_SHOTS_DIR: ${{ runner.temp }}/nyx-e2e-shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nyx-theme-visual-audit-${{ github.run_number }}
+          path: ${{ runner.temp }}/nyx-e2e-shots
+          if-no-files-found: warn

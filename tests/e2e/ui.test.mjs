@@ -728,3 +728,39 @@ test('desktop: the appearance theme picker shows all three themes above the fold
   const o = await overflow();
   assert.ok(o.scrollW <= o.vw);
 });
+
+// ── Visual audit (screenshots for human/CI review) ─────────────────────────
+// Enabled by setting NYX_E2E_SHOTS_DIR (the CI workflow does, and uploads the folder).
+const SHOTS_DIR = process.env.NYX_E2E_SHOTS_DIR || null;
+
+test('visual audit: screenshots of chat, appearance and the auth gate in every theme', { skip: !SHOTS_DIR && 'set NYX_E2E_SHOTS_DIR to capture screenshots' }, async () => {
+  await mkdir(SHOTS_DIR, { recursive: true });
+  await page.evaluate(() => window.NYX.chat.setTransport(async function* () {
+    yield 'Here is a **styled** answer with a list and code:\n\n- first point\n- second point\n\n```js\nconst nyx = true;\n```';
+  }));
+  await send('A test question for the audit');
+  await page.waitForFunction(() => document.querySelector('.msg-assistant')?.textContent.includes('const nyx = true;'));
+
+  for (const theme of ['black', 'night', 'light']) {
+    await page.evaluate((t) => window.NYX.prefs.set('theme', t), theme);
+    await page.screenshot({ path: `${SHOTS_DIR}/phone-${theme}-chat.png` });
+    await page.evaluate(() => window.NYX.router.go('appearance'));
+    await page.screenshot({ path: `${SHOTS_DIR}/phone-${theme}-appearance.png` });
+    await page.evaluate(() => window.NYX.router.go('chat'));
+  }
+  // Desktop layout in the default theme.
+  await openPage({ width: 1280, height: 800, mobile: false });
+  await page.evaluate(() => window.NYX.chat.setTransport(async function* () { yield 'Desktop reply for the audit.'; }));
+  await send('Desktop audit question');
+  await page.waitForFunction(() => document.querySelector('.msg-assistant')?.textContent.includes('Desktop reply'));
+  await page.screenshot({ path: `${SHOTS_DIR}/desktop-black-chat.png`, fullPage: false });
+  await page.screenshot({ path: `${SHOTS_DIR}/desktop-black-full.png`, fullPage: true });
+  // The signed-out auth gate in all three themes.
+  for (const theme of ['black', 'night', 'light']) {
+    await openPage({ signedOut: true });
+    await page.evaluate((t) => window.NYX.prefs.set('theme', t), theme);
+    await page.reload();
+    await page.waitForSelector('#auth-screen:not([hidden]) #auth-form');
+    await page.screenshot({ path: `${SHOTS_DIR}/phone-${theme}-auth.png` });
+  }
+});
