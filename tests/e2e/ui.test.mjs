@@ -89,7 +89,8 @@ after(async () => { await browser?.close(); server?.close(); await rm(workDir, {
 async function openPage({ width = 360, height = 780, mobile = true, signedOut = false } = {}) {
   await ctx?.close();
   ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, permissions: ['clipboard-read', 'clipboard-write'] });
-  if (!signedOut) await ctx.addInitScript(() => localStorage.setItem('__nyxE2eAuth', JSON.stringify({ email: 'tester@example.com' })));
+  // Idempotent seeding: a later updateProfile() must survive page.reload(), like the real SDK session.
+  if (!signedOut) await ctx.addInitScript(() => { if (!localStorage.getItem('__nyxE2eAuth')) localStorage.setItem('__nyxE2eAuth', JSON.stringify({ email: 'tester@example.com' })); });
   page = await ctx.newPage();
   problems = [];
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') problems.push(`console.${m.type()}: ${m.text()}`); });
@@ -132,6 +133,8 @@ const measure = () => page.evaluate(() => {
   return { scrollW: document.documentElement.scrollWidth, vw, bad: bad.slice(0, 5) };
 });
 const send = async (text) => { await page.fill('#composer-input', text); await page.click('#send-btn'); };
+/** Waits for the in-flight reply to finish streaming into the DOM (the send button is shown again). */
+const settle = () => page.waitForSelector('#send-btn:not([hidden])');
 
 test('starts cleanly: welcome screen, tagline and brand, no errors', async () => {
   assert.deepEqual(await view(), ['chat']);
@@ -167,6 +170,9 @@ test('chat input: send disabled when empty, enabled with text; a real request/re
   assert.equal(await page.inputValue('#composer-input'), '');
   assert.equal(await page.locator('.msg-user').count(), 1);
   await page.waitForSelector('.msg-assistant .msg-body');
+  // The reply is revealed progressively — wait for the full text instead of racing the first chunks.
+  await page.waitForFunction(() => document.querySelector('.msg-assistant .msg-body')?.textContent.includes('Hello from NYX (test backend)'));
+  await settle();
   assert.match(await page.textContent('.msg-assistant'), /Hello from NYX \(test backend\)/, 'the real transport got a reply');
   assert.equal(await page.isHidden('#welcome'), true);
 });
@@ -223,6 +229,9 @@ test('sidebar: search filters, shows empty states, and delete asks for confirmat
   await page.fill('#sidebar-search', '');
   // Conversation actions live behind the ⋯ overflow menu.
   await page.click('.conv-item >> nth=0 >> .conv-actions summary');
+  // Touch emulation can swallow a synthetic tap on <summary>; make sure the menu really opened.
+  await page.waitForFunction(() => document.querySelector('.conv-item .conv-actions')?.open === true, null, { timeout: 3000 })
+    .catch(() => page.dispatchEvent('.conv-item >> nth=0 >> .conv-actions summary', 'click'));
   await page.click('.conv-item >> nth=0 >> [data-del]');
   assert.equal(await page.$eval('#confirm-dialog', (d) => d.open), true);
   await page.click('#confirm-dialog button[value="cancel"]');
@@ -247,7 +256,7 @@ test('model selector: FREE selectable; PRO and MAX stay locked; selection persis
   assert.equal(await page.getAttribute('#model-options [data-value="pro"]', 'aria-disabled'), 'true');
   assert.match(await page.textContent('#model-options'), /Coming soon/);
   assert.match(await page.textContent('#model-sheet'), /FREE is available now/);
-  await page.click('#model-options [data-value="pro"]');
+  await page.click('#model-options [data-value="pro"]', { force: true }); // aria-disabled buttons stay tappable so they can explain themselves
   assert.equal(await page.textContent('#model-chip-label'), 'FREE', 'a locked tier cannot be selected');
   assert.match(await page.textContent('#toast'), /PRO is not available yet/);
   assert.equal(await page.getAttribute('#model-options [data-value="free"]', 'aria-checked'), 'true');
@@ -365,8 +374,7 @@ test('theme consistency: chat, settings, dialogs and the model sheet follow the 
   for (const [value, expect] of Object.entries(THEMES)) {
     await page.evaluate((t) => window.NYX.prefs.set('theme', t), value);
     assert.equal(await themeBg(value), expect.rgb, `${value}: chat canvas`);
-    await page.evaluate(() => window.NYX.router.go('settings'));
-    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-view="settings"] .group')).backgroundColor), expect.surface, `${value}: settings cards`);
+    // The model chip lives in the chat top bar, so open the sheet while the chat view shows.
     await page.click('#model-chip');
     // The sheet paints on the raised surface token of the active theme.
     const raised = await page.evaluate(() => {
@@ -379,6 +387,8 @@ test('theme consistency: chat, settings, dialogs and the model sheet follow the 
     });
     assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('model-sheet')).backgroundColor), raised, `${value}: sheet surface follows --bg-raised`);
     await page.keyboard.press('Escape');
+    await page.evaluate(() => window.NYX.router.go('settings'));
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-view="settings"] .group')).backgroundColor), expect.surface, `${value}: settings cards`);
     await page.evaluate(() => window.NYX.router.go('chat'));
     assert.notEqual(
       await page.evaluate(() => getComputedStyle(document.body).color),
@@ -416,11 +426,15 @@ test('account: display name updates the sidebar profile; delete-all resets local
   await page.click('#confirm-dialog button[value="cancel"]');
   assert.equal(await page.textContent('#local-count'), '1');
   await page.click('#reset-data');
+  // The app wipes localStorage and reloads right after confirming — the reload re-creates the
+  // global scope, so detect it by arming a window marker (hash-change waits would race).
+  await page.evaluate(() => { window.__preReset = 'armed'; });
   await page.click('#confirm-ok');
-  await page.waitForFunction(() => !localStorage.getItem('nyx.conversations'));
-  await page.waitForLoadState('load');
+  await page.waitForFunction(() => !window.__preReset);
   assert.deepEqual(await view(), ['chat']);
-  assert.equal(await page.textContent('#profile-name'), 'Guest');
+  assert.equal(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('nyx.')).length), 0, 'local data is really gone');
+  await page.waitForFunction(() => document.getElementById('acct-status')?.textContent === 'Signed in');
+  assert.equal(await page.textContent('#profile-name'), 'Ada Lovelace', 'the name lives on the account profile and survives a local wipe');
 });
 
 test('memory screen: preview switches toggle and are labelled as having no effect', async () => {
@@ -471,9 +485,11 @@ test('copy buttons work for messages and code blocks', async () => {
   await page.click('.msg-user [data-copy-msg]');
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'copy me please');
   assert.match(await page.textContent('#toast'), /Copied/);
+  await settle(); // let the first (real transport) reply finish before swapping the transport
   await page.evaluate(() => window.NYX.chat.setTransport(async function* () { yield '```js\nconst x = 1;\n```'; }));
   await send('code please');
   await page.waitForSelector('.code-block');
+  await settle();
   await page.click('.code-copy');
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'const x = 1;');
 });
@@ -491,6 +507,8 @@ test('transport hook: streams markdown into an assistant bubble; Stop aborts and
   await page.waitForSelector('#stop-btn:not([hidden])');
   assert.equal(await page.isHidden('#send-btn'), true);
   await page.waitForSelector('.msg-assistant strong');
+  // Wait until the streamed chunk is fully revealed, then abort only the pending continuation.
+  await page.waitForFunction(() => document.querySelector('.msg-assistant')?.textContent.includes('Hello from a test transport'));
   await page.click('#stop-btn');
   await page.waitForSelector('#send-btn:not([hidden])');
   assert.match(await page.textContent('.msg-assistant'), /Hello from a test transport/);
@@ -511,6 +529,7 @@ test('markdown from untrusted text is rendered safely', async () => {
   await page.evaluate(() => window.NYX.chat.setTransport(async function* () { yield '<img src=x onerror="window.__pwned=1"> [x](javascript:window.__pwned=1)'; }));
   await send('xss');
   await page.waitForSelector('.msg-assistant .md p');
+  await settle();
   assert.equal(await page.evaluate(() => window.__pwned), undefined);
   assert.equal(await page.locator('.msg-assistant .msg-body img').count(), 0);
   assert.equal(await page.locator('.msg-assistant a').count(), 0);
@@ -531,9 +550,11 @@ for (const width of [320, 360, 412]) {
   test(`no horizontal overflow on any screen at ${width}px`, async () => {
     await page.setViewportSize({ width, height: 740 });
     await send('```js\n' + 'const veryLongLine = "' + 'x'.repeat(200) + '";\n```');
+    await settle(); // wait for the real reply before replacing the transport
     await page.evaluate(() => window.NYX.chat.setTransport(async function* () { yield '| a | b | c | d | e |\n|---|---|---|---|---|\n| ' + 'long '.repeat(30) + '| 2 | 3 | 4 | 5 |\n\n' + 'https://example.com/' + 'a'.repeat(120); }));
     await send('table');
     await page.waitForSelector('.table-wrap');
+    await settle(); // the widest content is only painted once the stream finished
     let o = await overflow();
     assert.ok(o.scrollW <= o.vw && o.bad.length === 0, `chat ${JSON.stringify(o)}`);
     await page.click('#menu-btn');
@@ -634,8 +655,15 @@ test('keyboard open (short viewport): welcome stays fully visible and the compos
 });
 
 test('smooth scrolling: stays pinned to new messages; jump button appears after scrolling up', async () => {
-  for (let i = 0; i < 10; i++) await send(`message number ${i} `.repeat(6));
-  await page.waitForFunction(() => { const m = document.getElementById('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 4; });
+  // Long canned replies make the conversation reliably taller than the viewport, and waiting
+  // for each finished turn avoids the composer ignoring input while a reply is generated.
+  await page.evaluate(() => window.NYX.chat.setTransport(async function* () { yield 'Reply text that wraps onto several rows of the chat. '.repeat(30); }));
+  for (let i = 0; i < 6; i++) {
+    await send(`message number ${i}`);
+    await page.waitForSelector('#stop-btn:not([hidden])');
+    await settle();
+  }
+  await page.waitForFunction(() => { const m = document.getElementById('messages'); return m.scrollHeight > m.clientHeight * 1.5 && m.scrollHeight - m.scrollTop - m.clientHeight < 4; });
   assert.equal(await page.isHidden('#jump-btn'), true);
   await page.$eval('#messages', (m) => { m.scrollTop = 0; });
   await page.waitForSelector('#jump-btn:not([hidden])');
@@ -740,9 +768,11 @@ test('visual audit: screenshots of chat, appearance and the auth gate in every t
   }));
   await send('A test question for the audit');
   await page.waitForFunction(() => document.querySelector('.msg-assistant')?.textContent.includes('const nyx = true;'));
+  await settle(); // stream finished — the screenshots must not catch a half-painted bubble
 
   for (const theme of ['black', 'night', 'light']) {
     await page.evaluate((t) => window.NYX.prefs.set('theme', t), theme);
+    await page.waitForTimeout(150); // let the theme transition settle before the shot
     await page.screenshot({ path: `${SHOTS_DIR}/phone-${theme}-chat.png` });
     await page.evaluate(() => window.NYX.router.go('appearance'));
     await page.screenshot({ path: `${SHOTS_DIR}/phone-${theme}-appearance.png` });
@@ -753,6 +783,7 @@ test('visual audit: screenshots of chat, appearance and the auth gate in every t
   await page.evaluate(() => window.NYX.chat.setTransport(async function* () { yield 'Desktop reply for the audit.'; }));
   await send('Desktop audit question');
   await page.waitForFunction(() => document.querySelector('.msg-assistant')?.textContent.includes('Desktop reply'));
+  await settle();
   await page.screenshot({ path: `${SHOTS_DIR}/desktop-black-chat.png`, fullPage: false });
   await page.screenshot({ path: `${SHOTS_DIR}/desktop-black-full.png`, fullPage: true });
   // The signed-out auth gate in all three themes.

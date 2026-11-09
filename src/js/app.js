@@ -58,13 +58,19 @@ function boot() {
   sidebar = initSidebar({ store, chat, router, storage });
   initSettings({ prefs, store, storage });
   router.start();
+  // The first auth emission is the session restore at boot: keep any deep-linked route
+  // (#/settings & friends must survive a reload). Later emissions are real sign-in /
+  // sign-out transitions, which land on the chat.
+  let restoring = true;
   initAuth({ prefs, onSession: (user) => {
+    const bootRestore = restoring;
+    restoring = false;
     if (!user) {
       chat.newChat();
       sidebar.close({ restoreFocus: false });
       while (closeTopDialog()) { /* dismiss dialogs on sign out */ }
     }
-    router.go('chat', { replace: true });
+    if (!bootRestore) router.go('chat', { replace: true });
   } });
   bindBackButton({ router, sidebar });
 
