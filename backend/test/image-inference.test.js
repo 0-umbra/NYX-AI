@@ -514,3 +514,60 @@ test("an image larger than the server cap is still rejected", () => {
 test("the vision timeout stays bounded and documented", () => {
   assert.equal(VISION_TIMEOUT_MS, 20000);
 });
+
+// --- production-shaped request budget (field report 2026-11-10) ------------------------------
+
+test("a production-shaped image request stays well inside a CPU-limited budget", async () => {
+  // The field failure (every attachment 502, chat fine) is consistent with the Worker spending
+  // its whole CPU allowance before the vision call. This asserts the *request-handling* work --
+  // body decode, JSON parse, full attachment validation including base64 decoding and the
+  // magic-byte check -- for a realistic client payload. The mocked AI binding returns instantly,
+  // so the measurement isolates our own code rather than provider latency.
+  //
+  // Bound is deliberately loose (the measured value is a few ms on Node): this guards against
+  // regressions of the kind that shipped (a per-byte callback cost ~86 ms for this payload), not
+  // against noise on a slow CI box.
+  const big = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(1400 * 1024 - 4, 7)]);
+  const uri = dataUri("image/jpeg", big);
+  const requestBody = chatBody([imageAttachment({ data: uri })]);
+  const { env } = makeEnv();
+
+  // Warm the module graph so lazy imports are not counted.
+  await worker.fetch(post(requestBody), env);
+
+  const runs = 3;
+  const started = performance.now();
+  for (let i = 0; i < runs; i += 1) {
+    const response = await worker.fetch(post(requestBody), env);
+    assert.equal(response.status, 200);
+  }
+  const perRequest = (performance.now() - started) / runs;
+  assert.ok(
+    perRequest < 60,
+    `a 1.4 MB image request took ${perRequest.toFixed(1)} ms of request handling; ` +
+    "the pre-fix base64 decode alone cost ~86 ms and this is the regression that matters"
+  );
+});
+
+test("a classifiable vision failure never returns the generic catch-all message", async () => {
+  // The field report could not tell quota, capacity, plan gate, malformed output and a provider
+  // crash apart, because everything became one 502. Each classifiable cause must keep its own
+  // message, and the generic string must be reserved for genuinely unclassifiable failures.
+  const generic = "NYX AI couldn't analyse an attached image. Please try again later.";
+  const classifiable = [
+    ["quota", () => { throw providerError("daily free allocation used up"); }],
+    ["capacity", () => { throw providerError("Capacity temporarily exceeded", { status: 429, code: "3040" }); }],
+    ["plan gate", () => { throw providerError("requires a Workers Paid plan", { status: 403, code: "5035" }); }],
+    ["too large", () => { throw providerError("Request is too large", { status: 413, code: "3006" }); }],
+    ["bad data", () => { throw providerError("Invalid data type", { status: 400, code: "5004" }); }],
+    ["malformed output", () => ({ finish_reason: "length" })],
+    ["empty output", () => ({ answer: "   " })],
+  ];
+  for (const [label, vision] of classifiable) {
+    const { env } = makeEnv({ vision });
+    const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
+    const body = await response.text();
+    assert.notEqual(body.includes(generic), true, `${label} must not fall back to the generic 502`);
+    assert.ok(/error/.test(body), `${label} still returns a JSON error`);
+  }
+});
