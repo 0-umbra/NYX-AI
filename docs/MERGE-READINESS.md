@@ -81,7 +81,7 @@ count (2 for a text PDF, 3 for a scanned one, never per page) and that the snaps
 
 | Check | Result |
 | --- | --- |
-| `npm test` (frontend + static) | **215 / 215 passed** |
+| `npm test` (frontend + static) | **218 / 218 passed** |
 | `cd backend && npm test` | **97 / 97 passed** |
 | `npm run build` | Built `www/` |
 | `wrangler deploy --dry-run` | Compiled, 28.92 KiB |
@@ -190,13 +190,21 @@ The PDF failure **is** fixed.
 
 - **`verify`** — reuses `cloudflare-check.yml` unchanged via `workflow_call` (frontend tests, build,
   backend tests, `wrangler deploy --dry-run`);
-- **`deploy`** — declares `needs: verify`, so it cannot start unless verification succeeded, and
-  checks out `github.sha` (the commit that was verified) instead of a branch tip that could move.
+- **`deploy`** — declares `needs: verify`, so it cannot start unless verification succeeded;
+- **both jobs pin `github.sha`.** `cloudflare-check.yml` previously checked out `ref: develop`, a
+  race: it read whatever the branch pointed at when the checkout ran, not the commit the run was
+  raised for. Inside a reusable workflow the `github` context is the caller's, so `github.sha`
+  resolves to the caller's triggering commit — the same value `deploy` uses. Verified and shipped
+  commits are now provably identical.
+
+**First merge:** the gate is active immediately. GitHub resolves local `./` references from the
+caller's own commit, not the default branch, so no bootstrap step or default-branch workaround is
+needed. (An earlier revision of this document wrongly claimed otherwise.)
 
 `cloudflare-check.yml` gained only a `workflow_call:` trigger — no steps added, removed or weakened;
-it still runs on every push to `develop` exactly as before. Six tests in
-`tests/unit/deploy-gate.test.js` pin the gate; removing `needs: verify`, or reverting the checkout to
-a moving ref, each fails a test.
+it still runs on every push to `develop` exactly as before. Nine tests in
+`tests/unit/deploy-gate.test.js` pin the gate. Removing `needs: verify`, reverting a checkout to
+`ref: develop`, or hardcoding a SHA each fails at least one of them.
 
 ## Remaining risks
 
@@ -204,8 +212,7 @@ a moving ref, each fails a test.
    that expectation is not explicit, this could read as a failed fix.
 2. **Merging deploys immediately and automatically** — there is still no manual approval step, but
    the deploy job now cannot run until the reuse-gate workflow has passed. Merging is still
-   deploying, now with a test gate in front of it. _(Residual: `workflow_call` requires the reusable
-   workflow to exist on the default branch — see the note in the deploy workflow.)_
+   deploying, now with a test gate in front of it that runs against the same pinned commit.
 3. **One production deploy of unverified-in-production error paths.** The new mappings
    (415/413/503) have unit coverage but have never served real traffic. The blast radius is failures
    only — a successful request is unaffected — but a mistake here changes what users see when things
