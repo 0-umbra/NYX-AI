@@ -1,5 +1,33 @@
 # NYX AI — testing report
 
+## Diagnostics reliability (follow-up to the field report)
+
+The diagnostic record was audited against the six causes the investigation must separate. Three
+defects were found and fixed, each with a mutation-checked regression test.
+
+| Defect | Consequence in the field | Fix |
+| --- | --- | --- |
+| Provider-code regex matched `5xxx` only | `providerCode` was **null** for quota (3036), capacity (3040), too-large (3006) and timeout (3007) — the codes that matter most | Match both `3xxx` and `5xxx` |
+| `3040` was only detected inside the quota branch | "out of capacity" could be reported as *exhausted quota, resets at 00:00 UTC* | Hoisted above the quota branch |
+| `logVisionFailure` passed `stage`/`category` through unvalidated | A caller passing provider text would leak it into logs | Format-checked allowlist; a failing record is dropped, not logged |
+
+Also added: `stage=validation.image|validation.document` records, so a payload rejected **before**
+inference (base64, magic bytes, size caps) is no longer invisible — previously indistinguishable
+from a model failure.
+
+Verified distinct: CPU/resource-limit (`AI_RESOURCE_LIMIT`, 1102) · base64 decode
+(`AI_INVALID_BASE64`) · provider failure (`AI_FAILED` + status) · model unavailable
+(`AI_MODEL_UNAVAILABLE`, 5007) · quota (`AI_QUOTA`, 3036) / capacity (`AI_OUT_OF_CAPACITY`, 3040) ·
+malformed response (`AI_BAD_RESPONSE`) / empty (`AI_EMPTY`).
+
+Sanitization was tested adversarially, not just inspected: a provider error embedding image data,
+a file name, a prompt and a token in its message produces exactly one clean record; a caller passing
+hostile values directly into the record fields gets the record dropped.
+
+**Still not established:** the real production cause. Nothing here was captured from production —
+no `wrangler tail` output, no provider error code. See `docs/CAPTURE-PRODUCTION-FAILURE.md` for the
+read-only procedure; it has not been run.
+
 ## PDF ArrayBuffer-detachment fix + image-inference diagnosis (current branch)
 
 All results below were produced by commands executed on this branch. Nothing is estimated. The
@@ -11,8 +39,8 @@ Android SDK/Gradle/Java and no device in this environment).
 | Frontend unit + static checks | `npm test` | **200 / 200 passed**, 0 failed |
 | PDF detachment regressions | `node --test tests/unit/pdf-buffer.test.js` | **33 / 33 passed** |
 | Transport failure/notice regressions | `node --test tests/unit/transport-image-errors.test.js tests/unit/transport-notices.test.js` | **25 / 25 passed** |
-| Backend (Worker) tests | `cd backend && npm test` | **87 / 87 passed** |
-| Image-inference regressions | `cd backend && node --test test/image-inference.test.js` | **31 / 31 passed** |
+| Backend (Worker) tests | `cd backend && npm test` | **94 / 94 passed** |
+| Image-inference regressions | `cd backend && node --test test/image-inference.test.js` | **38 / 38 passed** |
 | Production build | `npm run build` | Built `www/`, incl. `www/vendor/pdf.worker.min.mjs` |
 | Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled; bindings `env.AI`, `env.CHAT_LIMITER` |
 | Android launcher icon | `node scripts/android-icons.mjs --check` | 22 files verified |

@@ -291,6 +291,18 @@ export default {
 
     const attachmentsResult = validateAttachments(body.attachments);
     if (!attachmentsResult.ok) {
+      // A rejected attachment never reaches the vision call, so without this the stage that
+      // fails *before* inference (base64 decoding, magic bytes, size caps) would leave no trace
+      // at all -- and "decode rejected the image" would look identical to "the model failed".
+      // Only fixed categories and integer codes are logged; never the payload or the file name.
+      const isImage = Array.isArray(body.attachments) &&
+        body.attachments.some((attachment) => attachment?.kind === "image");
+      logVisionFailure({
+        stage: isImage ? "validation.image" : "validation.document",
+        category: attachmentsResult.category || "AI_INVALID_REQUEST",
+        status: attachmentsResult.status || 400,
+        providerCode: null
+      });
       return json({ error: attachmentsResult.error }, attachmentsResult.status || 400, origin);
     }
     const attachments = attachmentsResult.attachments;

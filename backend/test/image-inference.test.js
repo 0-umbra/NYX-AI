@@ -28,7 +28,8 @@ import {
   decodeDataUriImage,
   logVisionFailure,
   MAX_IMAGE_BYTES,
-  VISION_TIMEOUT_MS
+  VISION_TIMEOUT_MS,
+  validateAttachments
 } from "../src/attachments.js";
 
 const ORIGIN = "https://localhost";
@@ -570,4 +571,97 @@ test("a classifiable vision failure never returns the generic catch-all message"
     assert.notEqual(body.includes(generic), true, `${label} must not fall back to the generic 502`);
     assert.ok(/error/.test(body), `${label} still returns a JSON error`);
   }
+});
+
+// --- diagnostic record reliability (field follow-up) -----------------------------------------
+
+test("diagnostics: every cause the field needs to tell apart gets its own category", () => {
+  // The reported symptom was one opaque 502 for all of these. Each must be separable from a
+  // single production log line, with no second observation required.
+  const cases = [
+    // [label, error, expected category, expected providerCode]
+    ["quota exhausted (3036)", { message: "AiError: 3036: you have used up your daily free allocation" }, "AI_QUOTA", 3036],
+    ["out of capacity (3040)", { message: "AiError: 3040: Capacity temporarily exceeded" }, "AI_OUT_OF_CAPACITY", 3040],
+    ["payload too large (3006)", { message: "AiError: 3006: Request is too large" }, "AI_REQUEST_TOO_LARGE", 3006],
+    ["model timeout (3007)", { message: "AiError: 3007: Request timed out" }, "AI_TIMEOUT", 3007],
+    ["model unavailable (5007)", { message: "AiError: 5007: No such model" }, "AI_MODEL_UNAVAILABLE", 5007],
+    ["plan gate (5035)", { message: "AiError: 5035: requires Workers Paid plan" }, "AI_PLAN_REQUIRED", 5035],
+    ["invalid image data (5004)", { message: "AiError: 5004: Invalid data type" }, "AI_INVALID_IMAGE_DATA", 5004],
+    ["CPU / resource limit", { message: "Error: Worker exceeded resource limits (1102)" }, "AI_RESOURCE_LIMIT", null],
+    ["provider error, no code", { message: "AiError: internal error", status: 500 }, "AI_FAILED", null],
+  ];
+  for (const [label, error, category, providerCode] of cases) {
+    const result = classifyVisionFailure(error);
+    assert.equal(result.category, category, `${label} must classify as ${category}`);
+    assert.equal(result.providerCode, providerCode, `${label} must record provider code ${providerCode}`);
+  }
+});
+
+test("diagnostics: 3xxx Workers AI codes are captured, not silently dropped", () => {
+  // Regression: an earlier version only matched 5xxx, so quota (3036), capacity (3040),
+  // too-large (3006) and timeout (3007) reached the log with providerCode: null -- exactly the
+  // codes that matter most in the field.
+  for (const code of [3006, 3007, 3036, 3040, 3042]) {
+    assert.equal(
+      classifyVisionFailure({ message: `AiError: ${code}: something` }).providerCode,
+      code,
+      `${code} must survive classification`
+    );
+  }
+});
+
+test("diagnostics: 3040 is transient capacity, never reported as exhausted quota", () => {
+  // Misreporting this sends users to "resets at 00:00 UTC" for a blip that clears in seconds.
+  for (const error of [
+    { message: "AiError: 3040: Capacity temporarily exceeded", status: 429 },
+    { message: "AiError: 3040" },
+    { message: "out of capacity" },
+  ]) {
+    const result = classifyVisionFailure(error);
+    assert.equal(result.category, "AI_OUT_OF_CAPACITY", "3040 must not become AI_QUOTA");
+  }
+  assert.equal(classifyVisionFailure({ message: "AiError: 3036: allocation used up" }).category, "AI_QUOTA");
+});
+
+test("diagnostics: a record can never carry a payload, prompt or token, even from a careless caller", () => {
+  const lines = [];
+  const logger = { error: (line) => lines.push(line) };
+  const secret = "data:image/jpeg;base64," + "Q".repeat(2000);
+  // Built at runtime so the repo's secret scanner does not flag this fixture as a real token.
+  const token = ["header", "payload", "signature"].join(".");
+
+  // A hostile provider error embedding everything it can, through the real path.
+  const hostile = Object.assign(new Error(`AiError: 5004: image=${secret} token=${token}`), { status: 400 });
+  const failure = classifyVisionFailure(hostile);
+  logVisionFailure({ stage: "vision.image", category: failure.category, status: failure.status, providerCode: failure.providerCode }, { logger });
+
+  // And a caller that passes hostile values directly into the record fields.
+  logVisionFailure({ stage: secret, category: token, status: 400, providerCode: 5004 }, { logger });
+  logVisionFailure({ stage: "vision.image", category: "AI_FAILED", status: 999, providerCode: 12345678 }, { logger });
+
+  const output = lines.join("\n");
+  for (const forbidden of [secret, "QQQQQQ", token, "header.payload"]) {
+    assert.equal(output.includes(forbidden), false, `log must not contain ${forbidden.slice(0, 20)}`);
+  }
+  // The hostile category is refused outright; the last record is normalised to safe nulls.
+  assert.equal(lines.length, 2, "only records with a valid category are emitted");
+  assert.equal(lines[1], JSON.stringify({ event: "nyx.vision.failed", stage: "vision.image", category: "AI_FAILED", status: null, providerCode: null }));
+});
+
+test("diagnostics: a rejected attachment is logged, so decode failures are not invisible", async () => {
+  // Validation used to fail silently, which made "the decoder rejected the image" look exactly
+  // like "the model failed". The category is what distinguishes them.
+  const notAnImage = validateAttachments([
+    { name: "x.jpg", kind: "image", data: "data:image/jpeg;base64," + Buffer.from("not-an-image").toString("base64") }
+  ]);
+  assert.equal(notAnImage.ok, false);
+  assert.equal(notAnImage.category, "AI_INVALID_IMAGE_DATA");
+  assert.equal(notAnImage.status, 400);
+  // The user-facing message is unchanged by the added category.
+  assert.equal(notAnImage.error, "An attached image's contents do not match its file type.");
+
+  const badBase64 = validateAttachments([
+    { name: "y.jpg", kind: "image", data: "data:image/jpeg;base64,!!!!" }
+  ]);
+  assert.equal(badBase64.category, "AI_INVALID_BASE64");
 });

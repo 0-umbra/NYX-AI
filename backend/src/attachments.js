@@ -75,24 +75,24 @@ function magicMatches(bytes, mime) {
 
 export function decodeDataUriImage(dataUri) {
   if (typeof dataUri !== "string" || dataUri.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 256) {
-    return { ok: false, error: "An attached image is too large." };
+    return { ok: false, error: "An attached image is too large.", category: "AI_REQUEST_TOO_LARGE" };
   }
   const match = DATA_URI_PATTERN.exec(dataUri);
   if (!match) {
-    return { ok: false, error: "An attached image is not valid base64 data." };
+    return { ok: false, error: "An attached image is not valid base64 data.", category: "AI_INVALID_BASE64" };
   }
   const [, mime, payload] = match;
   if (payload.length % 4 !== 0) {
-    return { ok: false, error: "An attached image is not valid base64 data." };
+    return { ok: false, error: "An attached image is not valid base64 data.", category: "AI_INVALID_BASE64" };
   }
   let binary;
   try {
     binary = atob(payload);
   } catch {
-    return { ok: false, error: "An attached image is not valid base64 data." };
+    return { ok: false, error: "An attached image is not valid base64 data.", category: "AI_INVALID_BASE64" };
   }
-  if (binary.length === 0) return { ok: false, error: "An attached image is empty." };
-  if (binary.length > MAX_IMAGE_BYTES) return { ok: false, error: "An attached image is too large." };
+  if (binary.length === 0) return { ok: false, error: "An attached image is empty.", category: "AI_EMPTY_IMAGE" };
+  if (binary.length > MAX_IMAGE_BYTES) return { ok: false, error: "An attached image is too large.", category: "AI_REQUEST_TOO_LARGE" };
   // PERF: the obvious form, `Uint8Array.from(binary, (c) => c.charCodeAt(0))`, invokes a JS
   // callback once per byte. Measured locally (Node 22, same engine family as the Workers runtime)
   // that is ~104 ms for a 1 MiB image and ~149 ms for a 1.4 MiB one -- the client's typical
@@ -108,7 +108,7 @@ export function decodeDataUriImage(dataUri) {
     bytes[index] = binary.charCodeAt(index);
   }
   if (!magicMatches(bytes, mime)) {
-    return { ok: false, error: "An attached image's contents do not match its file type." };
+    return { ok: false, error: "An attached image's contents do not match its file type.", category: "AI_INVALID_IMAGE_DATA" };
   }
   return { ok: true, mime, bytes, dataUri };
 }
@@ -139,9 +139,18 @@ export function validateAttachments(input) {
 
     if (raw.kind === "image") {
       const decoded = decodeDataUriImage(raw.data);
-      if (!decoded.ok) return { ok: false, error: decoded.error, status: 400 };
+      if (!decoded.ok) {
+        // `category` is a fixed token used for the sanitized diagnostic only; the user-facing
+        // message stays exactly what it was.
+        return { ok: false, error: decoded.error, status: 400, category: decoded.category || "AI_INVALID_REQUEST" };
+      }
       if (raw.mime !== undefined && raw.mime !== decoded.mime) {
-        return { ok: false, error: "An attached image's file type does not match its data.", status: 400 };
+        return {
+          ok: false,
+          error: "An attached image's file type does not match its data.",
+          status: 400,
+          category: "AI_INVALID_IMAGE_DATA"
+        };
       }
       const ocr = raw.ocr === true;
       imageCount += 1;
@@ -225,13 +234,20 @@ export function classifyVisionFailure(error) {
     .join(" ");
   const statusPart = Number(error?.status ?? error?.statusCode);
   const status = Number.isInteger(statusPart) && statusPart >= 100 && statusPart <= 599 ? statusPart : null;
-  const codeMatch = /(?:^|\D)(5\d{3})(?:\D|$)/.exec(haystack);
+  // Workers AI exposes its error table as numeric codes in two families: 3xxx (request/quota/
+  // capacity/timeout) and 5xxx (model, plan, payload). Matching only 5xxx would silently drop
+  // the codes that matter most in the field -- 3036 (quota), 3040 (out of capacity) and
+  // 3006/3007 (too large / timeout) -- so both families are captured.
+  const codeMatch = /(?:^|\D)([35]\d{3})(?:\D|$)/.exec(haystack);
   const providerCode = codeMatch ? Number(codeMatch[1]) : null;
 
+  // 3040 "out of capacity" is a transient 429, not an exhausted daily allocation: it must not be
+  // reported to the user as "quota exhausted, resets at 00:00 UTC". Checked before the quota
+  // branch so the reason survives even when the provider's message arrives without the wording.
+  if (providerCode === 3040 || /out of capacity/i.test(haystack)) {
+    return { category: "AI_OUT_OF_CAPACITY", status: 429, providerCode: 3040 };
+  }
   if (isQuotaError(error) || providerCode === 3036 || status === 429) {
-    // 3040 "out of capacity" is a transient 429, not an exhausted daily allocation: it must not
-    // be reported to the user as "quota exhausted, resets at 00:00 UTC".
-    if (/out of capacity|3040/i.test(haystack)) return { category: "AI_OUT_OF_CAPACITY", status: 429, providerCode: 3040 };
     return { category: "AI_QUOTA", status: status ?? 429, providerCode: providerCode ?? 3036 };
   }
   if (providerCode === 5035) return { category: "AI_PLAN_REQUIRED", status: 403, providerCode };
@@ -256,12 +272,25 @@ export function classifyVisionFailure(error) {
 export function logVisionFailure(diagnostic, { logger = console, sampleRate = 1 } = {}) {
   if (typeof diagnostic?.category !== "string") return;
   if (!(Math.random() < sampleRate)) return;
+  // Allowlist, not pass-through: the record is built only from values that are already known-safe
+  // shapes. A category is an upper-case token, so anything else (a provider message, a data URI,
+  // a token) is refused outright rather than logged. This keeps the guarantee intact even if a
+  // future caller passes the wrong thing.
+  const category = diagnostic.category;
+  if (!/^[A-Z][A-Z0-9_]{0,40}$/.test(category)) return;
+  const stage = typeof diagnostic.stage === "string" && /^[a-z][a-z0-9_.]{0,40}$/.test(diagnostic.stage)
+    ? diagnostic.stage
+    : "vision";
   const record = {
     event: "nyx.vision.failed",
-    stage: String(diagnostic.stage ?? "vision"),
-    category: diagnostic.category,
-    status: Number.isInteger(diagnostic.status) ? diagnostic.status : null,
-    providerCode: Number.isInteger(diagnostic.providerCode) ? diagnostic.providerCode : null,
+    stage,
+    category,
+    status: Number.isInteger(diagnostic.status) && diagnostic.status >= 100 && diagnostic.status <= 599
+      ? diagnostic.status
+      : null,
+    providerCode: Number.isInteger(diagnostic.providerCode) && diagnostic.providerCode >= 1000 && diagnostic.providerCode <= 9999
+      ? diagnostic.providerCode
+      : null,
   };
   try {
     logger.error(JSON.stringify(record));
