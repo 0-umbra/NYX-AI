@@ -13,8 +13,16 @@ name: Deploy NYX AI Worker
 #   2. `deploy` declares `needs: verify`, so it cannot start — let alone run `wrangler deploy` —
 #      unless `verify` succeeded.
 #
-# The deploy job also now checks out the exact commit that was verified (`github.sha`) instead of
-# re-reading a branch tip that could move in between, so what is tested is what is shipped.
+# Both jobs check out `github.sha`, so the two run against exactly the same commit:
+#   - `verify` inherits the caller's `github` context, so `github.sha` there is the commit that
+#     triggered this deploy run;
+#   - `deploy` is in this same workflow, so its `github.sha` is the same value.
+# That is what makes "we verified exactly what we shipped" a guarantee rather than an intention.
+#
+# On first merge: `uses: ./.github/workflows/cloudflare-check.yml` resolves the called workflow
+# from the SAME commit as this caller (GitHub's documented behaviour for local `./` and `$/`
+# references) -- it is not read from the default branch. So the gate is active on this deploy
+# itself; no bootstrap step or default-branch workaround is needed.
 
 on:
   push:

@@ -54,6 +54,55 @@ test('deployment happens only in the gated job, and only from a verified commit'
     'must check out the commit that was verified, not a moving branch tip');
 });
 
+test('verification is pinned to the triggering SHA, not a branch name', () => {
+  // A branch name here is a race: the checks would read whatever `develop` pointed at when the
+  // checkout ran, which need not be the commit the run was raised for. `github.sha` is that
+  // commit. Inside a reusable workflow the `github` context belongs to the caller, so the
+  // verification job resolves it to the caller's triggering commit.
+  const verifyBlock = deploy.slice(deploy.indexOf('\n  verify:'), deploy.indexOf('\n  deploy:'));
+  assert.match(verifyBlock, /uses:\s*\.\/\.github\/workflows\/cloudflare-check\.yml/,
+    'verify calls the shared workflow');
+
+  const checkCheckout = check.slice(check.indexOf('actions/checkout'));
+  // The expression contains a space, so match the trimmed rest of the line.
+  const refMatch = /ref:[ \t]*(.+)[ \t]*\r?$/m.exec(checkCheckout);
+  assert.ok(refMatch, 'the shared check workflow declares a checkout ref');
+  assert.equal(refMatch[1].trim(), '${{ github.sha }}', 'must check out the triggering commit');
+
+  // No branch-name checkout anywhere in the shared workflow: any `ref:` must be github.sha (or
+  // another expression), and specifically not a literal branch.
+  for (const line of check.split('\n').filter((l) => /^\s+ref:/.test(l))) {
+    assert.doesNotMatch(line, /ref:\s*(develop|main|master)\s*$/,
+      `branch-name checkout is a race: ${line.trim()}`);
+    assert.match(line, /github\.sha/, `every checkout ref must be the triggering SHA: ${line.trim()}`);
+  }
+});
+
+test('the verification and deploy jobs use the same commit SHA', () => {
+  // Both resolve `github.sha` from the same run context, so the verified commit is the shipped one.
+  const deployBlock = deploy.slice(deploy.indexOf('\n  deploy:'));
+  assert.match(deployBlock, /ref:\s*\$\{\{\s*github\.sha\s*\}\}/, 'deploy pins the SHA');
+  const checkRefs = check.split('\n').filter((l) => /^\s+ref:/.test(l));
+  assert.ok(checkRefs.length > 0, 'verification declares its ref');
+  for (const line of checkRefs) {
+    assert.match(line, /\$\{\{\s*github\.sha\s*\}\}/, 'verification pins the same SHA expression');
+  }
+  // No SHA is hardcoded, which would silently pin both jobs away from the triggering commit.
+  assert.doesNotMatch(deploy + check, /ref:\s*[0-9a-f]{40}\s*$/m, 'no hardcoded SHA');
+});
+
+test('the reusable workflow is called locally, so it resolves at the caller commit', () => {
+  // GitHub resolves `./` and `$/` references from the caller's own commit, not the default branch,
+  // so the gate works on the very first merge without a bootstrap step. An `owner/repo/...@ref`
+  // form would NOT have that property -- that is why it must stay local.
+  assert.match(deploy, /uses:\s*\.\/\.github\/workflows\/cloudflare-check\.yml/,
+    'must use the local ./ form');
+  assert.doesNotMatch(deploy, /uses:\s*[\w-]+\/[\w.-]+\/\.github\/workflows\/[^\s]+@/,
+    'a cross-repo @ref form would not track the caller commit');
+  // And the caller must not pin the call to a branch either.
+  assert.doesNotMatch(deploy, /cloudflare-check\.yml@/, 'no @ref on the local reference');
+});
+
 test('credentials are only exposed to the deploy step', () => {
   const deployBlock = deploy.slice(deploy.indexOf('\n  deploy:'));
   assert.match(deployBlock, /CLOUDFLARE_API_TOKEN:\s*\$\{\{\s*secrets\.CLOUDFLARE_API_TOKEN\s*\}\}/);

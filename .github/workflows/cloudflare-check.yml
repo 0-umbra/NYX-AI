@@ -16,10 +16,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout develop
+      # Pinned to the commit that triggered the run, never a branch name.
+      #
+      # `develop` here would be a race: the job would read whatever the branch pointed at when the
+      # checkout ran, not the commit the event was raised for. A push landing mid-run could make
+      # the checks pass against code that is not being deployed -- or vice versa.
+      #
+      # `github.sha` is the triggering commit. When this file is run as a reusable workflow via
+      # workflow_call, the `github` context belongs to the CALLER, so this resolves to the caller's
+      # triggering commit -- the same value the deploy job checks out. That is what makes "we
+      # verified exactly what we shipped" true rather than merely intended.
+      - name: Checkout the triggering commit
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
