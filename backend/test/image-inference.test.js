@@ -418,7 +418,7 @@ test("diagnostics: one structured, sanitized record per failed vision call", asy
   }
   const records = capture.records().filter((record) => record.event === "nyx.vision.failed");
   assert.equal(records.length, 1, "exactly one record per failed call, not per byte or per page");
-  assert.deepEqual(Object.keys(records[0]).sort(), ["category", "event", "providerCode", "stage", "status"]);
+  assert.deepEqual(Object.keys(records[0]).sort(), ["category", "elapsedMs", "event", "providerCode", "stage", "status"]);
   assert.equal(records[0].stage, "vision.image");
   assert.equal(records[0].category, "AI_INVALID_IMAGE_DATA");
   // The classification, not the incoming HTTP status, decides the code and status.
@@ -645,7 +645,7 @@ test("diagnostics: a record can never carry a payload, prompt or token, even fro
   }
   // The hostile category is refused outright; the last record is normalised to safe nulls.
   assert.equal(lines.length, 2, "only records with a valid category are emitted");
-  assert.equal(lines[1], JSON.stringify({ event: "nyx.vision.failed", stage: "vision.image", category: "AI_FAILED", status: null, providerCode: null }));
+  assert.equal(lines[1], JSON.stringify({ event: "nyx.vision.failed", stage: "vision.image", category: "AI_FAILED", status: null, providerCode: null, elapsedMs: null }));
 });
 
 test("diagnostics: a rejected attachment is logged, so decode failures are not invisible", async () => {
@@ -664,4 +664,46 @@ test("diagnostics: a rejected attachment is logged, so decode failures are not i
     { name: "y.jpg", kind: "image", data: "data:image/jpeg;base64,!!!!" }
   ]);
   assert.equal(badBase64.category, "AI_INVALID_BASE64");
+});
+
+test("diagnostics: elapsedMs separates an instant rejection from a slow timeout", () => {
+  // Without a provider code, the captured production log gave no way to tell a fast rejection
+  // (bad payload / unavailable model) from a generation that ran out of time. Duration does.
+  const lines = [];
+  const logger = { error: (line) => lines.push(line) };
+  logVisionFailure({ stage: "vision.image", category: "AI_FAILED", elapsedMs: 480 }, { logger });
+  logVisionFailure({ stage: "vision.image", category: "AI_TIMEOUT", elapsedMs: 20010 }, { logger });
+
+  assert.equal(JSON.parse(lines[0]).elapsedMs, 500, "coarsened to 100 ms");
+  assert.equal(JSON.parse(lines[1]).elapsedMs, 20000);
+  assert.ok(JSON.parse(lines[1]).elapsedMs > JSON.parse(lines[0]).elapsedMs * 10);
+});
+
+test("diagnostics: elapsedMs never carries junk or a negative duration", () => {
+  const lines = [];
+  const logger = { error: (line) => lines.push(line) };
+  for (const elapsedMs of [-1, "slow", null, undefined, NaN, 10 ** 9]) {
+    logVisionFailure({ stage: "vision.image", category: "AI_FAILED", elapsedMs }, { logger });
+  }
+  assert.equal(lines.length, 6);
+  for (const line of lines) assert.equal(JSON.parse(line).elapsedMs, null);
+});
+
+test("diagnostics: the record shape is exactly the documented fields", () => {
+  // An allowlist is only a guarantee if nothing else can slip into the record.
+  const lines = [];
+  const logger = { error: (line) => lines.push(line) };
+  logVisionFailure({
+    stage: "vision.image",
+    category: "AI_FAILED",
+    status: 502,
+    providerCode: 5007,
+    elapsedMs: 1000,
+    image: "data:image/jpeg;base64,AAAA",
+    prompt: "secret question",
+    name: "passport.jpg"
+  }, { logger });
+  const record = JSON.parse(lines[0]);
+  assert.deepEqual(Object.keys(record).sort(),
+    ["category", "elapsedMs", "event", "providerCode", "stage", "status"]);
 });

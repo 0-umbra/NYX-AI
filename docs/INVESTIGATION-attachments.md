@@ -229,3 +229,104 @@ follow-up work rather than silently claimed as done.
 - **Model availability:** no evidence of a problem; the plan gate is ruled out by primary sources.
 - **Not established:** the provider's actual error code. That requires the production logs this
   environment cannot reach.
+
+---
+
+# Addendum — analysis of the first real production capture (2026-11-10 12:29 IST)
+
+The following was captured by the reporter from Cloudflare Dashboard → Workers & Pages →
+nyx-ai-backend → Observability → Live. It is the first production evidence in this investigation and
+it is recorded verbatim.
+
+```
+2026-11-10 12:29:24.910 IST  error  Workers AI vision request failed.
+2026-11-10 12:29:24.910 IST  error  POST https://nyx-ai-backend.mehrablone100-8ee.workers.dev/chat
+2026-11-10 12:29:23.714 IST  info   OPTIONS https://nyx-ai-backend.mehrablone100-8ee.workers.dev/chat
+```
+
+## What this establishes
+
+**1. The request reached the Worker, authenticated, parsed, and entered the vision loop.**
+`Workers AI vision request failed.` is emitted at exactly one place in the deployed code
+(`2a3fad1:backend/src/index.js:338`), inside the `catch` around `analyzeImage`. Reaching that line
+requires all of the following to have already succeeded: CORS preflight, Firebase JWT verification,
+the rate limiter, reading the body under the size cap, `JSON.parse`, `validateAttachments` (including
+base64 decoding and the magic-byte check), the model-tier check, conversation building, and the
+`kind !== "image"` filter. So none of those is the cause.
+
+**2. The failure was not quota, and not a rate limit.** Both `AI_QUOTA` and the limiter return
+*before* that line, and neither logs it.
+
+**3. CPU exhaustion is not the explanation — and this corrects the earlier hypothesis.** A Worker
+killed for exceeding its CPU budget cannot emit a console entry and then return a 502 body: the
+execution is terminated. Observing a deliberate `console.error` and a completed request at the same
+millisecond falsifies H1 as previously stated. The 50–86 ms decode measurement was real, but it is
+**not what is failing here**. The base64 decoding completed successfully — that is precisely why the
+request reached the vision call.
+
+**4. The failing stage is `ai.run(VISION_MODEL, …)` or the parsing of its result.**
+
+**5. The response is a 502 with an empty 24 ms round trip,** which rules out the 20 s vision timeout
+as the cause of this particular failure.
+
+## What remains unknown
+
+The deployed code cannot say *why* the vision call failed. `2a3fad1` maps everything that is not
+quota — a missing model, a rejected payload, capacity, a plan gate, a malformed response — onto this
+single string. This was verified by executing the deployed request path with a stubbed provider:
+
+| Simulated cause | Deployed log line | Deployed status |
+| --- | --- | --- |
+| provider throws, no code | `Workers AI vision request failed.` | 502 |
+| 5007 no such model | *identical* | 502 |
+| 3040 out of capacity | *identical* | 502 |
+| 5035 paid plan | *identical* | 502 |
+| 5004 invalid data | *identical* | 502 |
+| no `answer` field | *identical* | 502 |
+| empty `answer` | *identical* | 502 |
+
+Seven distinct causes; one indistinguishable line. **The captured log therefore proves where the
+failure is, but not what it is.** Reporting a cause from it would be guesswork.
+
+## The 24 ms gap — suggestive, not proven
+
+`OPTIONS` completed at 23.714; the `POST` and its error share the timestamp 24.910, ≈1.20 s later.
+The 502 came back within milliseconds of the vision call failing, apparently in the same millisecond.
+A generation attempt by a 9B model takes seconds even for a trivial image. A near-instant failure is
+more consistent with an immediate rejection (bad request shape, unsupported or unavailable model)
+than with a slow model. **This is an inference from timestamps, not an observation** — the log does
+not show when `ai.run` was invoked, only when the request started and when the error was logged.
+
+## Smaller detail worth checking
+
+The client shows `NYX AI couldn't analyse an attached image…`, but the deployed frontend transport
+(`2a3fad1:src/js/transport.js:121-127`) maps a non-quota, non-401/429 error to
+`The AI service couldn't respond. Please try again.` — it does **not** surface the server's `error`
+field. So the exact wording the user sees may indicate a newer frontend build than the deployed
+backend, or a different surface (e.g. the attachment chip) than the transport path. This does not
+change the Worker-side conclusion (the 502 is still the Worker's), but it should be confirmed before
+the fix is judged by the user's screenshot.
+
+## What the PR #13 build reports for the same seven causes
+
+Executed against the current branch rather than asserted from reading the code:
+
+| Simulated cause | PR #13 record | PR #13 HTTP |
+| --- | --- | --- |
+| provider throws, no code | `vision.image \| AI_FAILED \| code=null` | 502 |
+| 5007 no such model | `vision.image \| AI_MODEL_UNAVAILABLE \| code=5007` | 503 |
+| 3040 out of capacity | `vision.image \| AI_OUT_OF_CAPACITY \| code=3040` | 503 |
+| 5035 paid plan | `vision.image \| AI_PLAN_REQUIRED \| code=5035` | 503 |
+| 5004 invalid data | `vision.image \| AI_INVALID_IMAGE_DATA \| code=5004` | 415 |
+| no `answer` field | `vision.image \| AI_BAD_RESPONSE \| code=null` | 502 |
+| empty `answer` | `vision.image \| AI_EMPTY \| code=null` | 502 |
+
+All seven become distinguishable — so **yes**, the current PR diagnostics can identify the exact
+failure after deployment. Two residual gaps were found and closed in the same commit:
+
+- **A rejection inside `ai.run` that exposes no numeric code** (a bare `AiError: …`) still lands on
+  `AI_FAILED` with `providerCode: null`. Category alone would not separate "rejected the payload"
+  from "crashed". The record now carries `elapsedMs` (coarsened to 100 ms), which distinguishes a
+  sub-second rejection from a multi-second generation that ran out of budget.
+- **`AI_EMPTY` / `AI_BAD_RESPONSE` can still mean a legitimate blank answer** for a blank image.
+  This is not distinguishable from a fault without knowing the image, and is not claimed to be.

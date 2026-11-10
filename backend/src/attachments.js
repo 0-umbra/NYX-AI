@@ -291,6 +291,13 @@ export function logVisionFailure(diagnostic, { logger = console, sampleRate = 1 
     providerCode: Number.isInteger(diagnostic.providerCode) && diagnostic.providerCode >= 1000 && diagnostic.providerCode <= 9999
       ? diagnostic.providerCode
       : null,
+    // How long the vision attempt took, to the nearest 100 ms. This is the only way to tell an
+    // instant provider rejection (bad payload, unavailable model -- a few hundred ms) from a
+    // slow generation that ran out of budget (seconds to the 20 s timeout) when the provider
+    // exposes no code. Coarse on purpose: it is diagnostic, not a benchmark, and loses nothing.
+    elapsedMs: Number.isInteger(diagnostic.elapsedMs) && diagnostic.elapsedMs >= 0 && diagnostic.elapsedMs <= 300000
+      ? Math.round(diagnostic.elapsedMs / 100) * 100
+      : null,
   };
   try {
     logger.error(JSON.stringify(record));

@@ -340,9 +340,11 @@ export default {
     for (let index = 0; index < attachments.length; index += 1) {
       const attachment = attachments[index];
       if (attachment.kind !== "image") continue;
+      const visionStartedAt = Date.now();
       try {
         analyses[index] = await analyzeImage(env.AI, attachment, userText);
       } catch (error) {
+        const elapsedMs = Date.now() - visionStartedAt;
         const status = Number.isInteger(error?.status) ? error.status : null;
         const providerCode = Number.isInteger(error?.providerCode) ? error.providerCode : null;
         // One sanitized diagnostic per failed vision call: stage, category, status and the
@@ -351,7 +353,8 @@ export default {
           stage: attachment.ocr ? "vision.ocr_page" : "vision.image",
           category: error?.code ?? "AI_FAILED",
           status,
-          providerCode
+          providerCode,
+          elapsedMs
         });
 
         // Distinct, actionable causes get distinct user-facing messages; the body is built from

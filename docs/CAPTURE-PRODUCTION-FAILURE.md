@@ -8,6 +8,13 @@ deployment, no data. It is safe to run against production.
 
 ---
 
+> **Update (2026-11-10 12:29 IST): one real capture has now been taken** by the reporter from the
+> dashboard's Live view. It established that the request reaches the vision call and returns a 502 in
+> ~24 ms, ruling out CPU exhaustion and quota. It could **not** establish the provider cause, because
+> the deployed code collapses seven distinct causes onto one message. See the addendum in
+> `docs/INVESTIGATION-attachments.md`. The procedure below remains valid for obtaining the exact
+> cause **after** this branch is deployed.
+
 ## 0. Which build these instructions are for
 
 The diagnostics described below (`nyx.vision.failed` records with `stage` / `category` / `status` /
