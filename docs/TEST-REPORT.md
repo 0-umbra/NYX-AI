@@ -1,5 +1,60 @@
 # NYX AI — testing report
 
+## PDF ArrayBuffer-detachment fix + image-inference diagnosis (current branch)
+
+All results below were produced by commands executed on this branch. Nothing is estimated. The
+Cloudflare Worker was **not deployed** (dry run only) and **Android WebView was not tested** (no
+Android SDK/Gradle/Java and no device in this environment).
+
+| Suite | Command | Result |
+| --- | --- | --- |
+| Frontend unit + static checks | `npm test` | **190 / 190 passed**, 0 failed (~44 s) |
+| PDF detachment regressions | `node --test tests/unit/pdf-buffer.test.js` | **23 / 23 passed** |
+| Transport failure/notice regressions | `node --test tests/unit/transport-image-errors.test.js tests/unit/transport-notices.test.js` | **25 / 25 passed** |
+| Backend (Worker) tests | `cd backend && npm test` | **87 / 87 passed** |
+| Image-inference regressions | `cd backend && node --test test/image-inference.test.js` | **31 / 31 passed** |
+| Production build | `npm run build` | Built `www/`, incl. `www/vendor/pdf.worker.min.mjs` |
+| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled, 27.21 KiB / 8.01 KiB gzip; `env.AI`, `env.CHAT_LIMITER` |
+| Android launcher icon | `node scripts/android-icons.mjs --check` | 22 files verified |
+| `git diff --check` | — | clean |
+| Android debug APK | `.github/workflows/android-debug.yml` | **Not run here** (no Android toolchain) |
+| Browser end-to-end | `npm run test:e2e` | **Not run here** (Playwright browser download blocked in this sandbox) |
+
+### PDF fix — root cause and evidence
+
+`pdfjs-dist` **5.7.284**; `legacy/build/pdf.mjs:21611`:
+`worker.messageHandler.sendWithPromise("GetDocRequest", docParams, data ? [data.buffer] : null)` —
+the buffer is a **transferable**, so `getDocument()` detaches the caller's ArrayBuffer. The old
+`processPdfDocument()` read the file once and passed the same buffer to the text pass, then to the
+OCR pass; the second `new Uint8Array(data)` threw *"Cannot perform Construct on a detached
+ArrayBuffer"*. Reproduced on the pre-fix code (caller buffer `604 → 0` bytes) and confirmed fixed
+(same call keeps `604` bytes and can be reused).
+
+### Image investigation — what was found
+
+Not the same cause as the PDF bug. The observed message is the frontend's generic catch-all, which
+also discards every backend explanation. Two defects were found and fixed:
+
+1. **Workers Free CPU limit.** `decodeDataUriImage` used `Uint8Array.from(binary, cb)`, a JS
+   callback per byte. Measured on a realistic client payload (1.37 MiB decoded): **114.1 ms**,
+   against a **10 ms** Workers Free per-request CPU budget — so every image request was killed by
+   the platform (non-JSON edge error, generic frontend message). The same bytes now decode in
+   **3.2 ms** with an indexed loop; the validation and returned bytes are unchanged.
+2. **Error mapping.** The Worker collapsed every vision failure into one opaque 502 and the
+   frontend replaced even that with "check your connection". Failures are now classified
+   (quota, plan gate, model unavailable/deprecated, payload too large, invalid image data,
+   timeout, out of capacity, malformed/empty provider response), logged once as a sanitized
+   structured record (stage, category, status, Workers AI numeric code only) and mapped to a
+   distinct, actionable, sanitized message that the conversation displays.
+
+**Not verified:** live Workers AI / Moondream inference. There are no Cloudflare credentials or
+network access to the Worker in this environment, so no real image inference was performed. The
+tests use a mocked `env.AI` binding and assert request shape, response parsing, failure mapping and
+diagnostics — they cannot prove the deployed model answers. Likewise the plan-gate category is
+handled defensively; whether this account's plan actually rejects the vision model is unknown.
+
+---
+
 ## Conversation context update (current branch)
 
 All results below come from commands executed on this branch. Nothing is estimated; the

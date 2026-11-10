@@ -8,6 +8,13 @@ import { isModelAvailable } from './models.js';
 import { buildConversationHistory, isSendableHistory } from './history.js';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
+// A Worker `error` string reaches the user only if it passes BOTH gates below: it must be one
+// short line of prose (no dump, stack, URL or identifier), and it must be recognisably one of the
+// explanations this app writes for attachment/transport failures. Anything else keeps the generic
+// message, so provider text can never be relayed by accident.
+const MAX_RELAYED_ERROR_CHARS = 200;
+const SAFE_ERROR_PATTERN = /^[^\n\r\t<>{}[\]`$\\]{1,200}$/;
+const EXPLAINED_FAILURE_PATTERN = /\b(image|images|picture|photo|attachment|attachments|file|files|document|documents|PDF|PDFs|session|quota|backend|reply|request)\b|\btoo large\b|\btoo many\b/i;
 
 /** Error message shown when the Worker reports the free daily Workers AI allocation is exhausted. */
 export const QUOTA_EXHAUSTED_MESSAGE = 'The free daily AI quota is exhausted. It resets at 00:00 UTC.';
@@ -25,9 +32,67 @@ function getEndpoint() {
   return `${base}/chat`;
 }
 
+/**
+ * Turns a failed /chat response into a message the user can act on.
+ *
+ * The Worker already answers with a sanitized, user-safe `error` string; the frontend used to
+ * discard it and show a generic connection message, which made an image-processing failure
+ * indistinguishable from being offline. Only the Worker's own bounded, fixed messages are
+ * relayed (never a provider error, never anything unknown), so this cannot leak provider text.
+ */
+/**
+ * Safe diagnostic for a failed request. Records the stage, the HTTP status and a fixed category
+ * only — never the Firebase ID token, the request body, attachments, base64 data or raw provider
+ * text. A network failure (no response at all) is distinct from a server-reported failure, which
+ * is the distinction that makes an unreachable backend diagnosable on a device.
+ */
+function reportFailure(diagnostics, stage, category, status = null) {
+  try {
+    diagnostics?.record(stage, category, Number.isInteger(status) ? { status } : {});
+  } catch {
+    // Diagnostics must never replace the real failure. A failing sink is swallowed here rather
+    // than escaping as an unhandled rejection on the next `await`.
+  }
+}
+
+/** Maps a non-OK /chat response to a fixed category. Never derived from provider text. */
+export function categoryForStatus(status) {
+  if (status === 401) return 'UNAUTHORIZED';
+  if (status === 403) return 'FORBIDDEN';
+  if (status === 413) return 'TOO_LARGE';
+  if (status === 415) return 'UNSUPPORTED_MEDIA';
+  if (status === 429) return 'RATE_LIMITED_OR_QUOTA';
+  if (status >= 500) return 'SERVER_ERROR';
+  if (status >= 400) return 'REQUEST_REJECTED';
+  return 'UNEXPECTED_STATUS';
+}
+
+/** Marks an error whose `message` is safe and useful to show in the conversation. */
+function userFacingError(message) {
+  const error = new Error(message);
+  error.userFacing = true;
+  return error;
+}
+
+function messageForFailure(status, data) {
+  const quota = data?.quotaExhausted === true || (status === 429 && typeof data?.error === 'string' && data.error.includes('quota'));
+  if (quota) return QUOTA_EXHAUSTED_MESSAGE;
+  if (status === 401) return 'Your session has expired. Please sign in again.';
+  if (status === 429) return 'Too many requests. Please wait a moment and try again.';
+  // Worker-authored, bounded and already sanitized: relay it instead of hiding the cause.
+  const reported = typeof data?.error === 'string' ? data.error.trim() : '';
+  if (reported &&
+      reported.length <= MAX_RELAYED_ERROR_CHARS &&
+      SAFE_ERROR_PATTERN.test(reported) &&
+      EXPLAINED_FAILURE_PATTERN.test(reported)) {
+    return reported;
+  }
+  return 'The AI service couldn’t respond. Please try again.';
+}
+
 async function readResponse(response) {
   const reader = response.body?.getReader();
-  if (!reader) throw new Error('Invalid backend response.');
+  if (!reader) throw userFacingError('The reply couldn’t be completed. Check your connection and try again.');
 
   const chunks = [];
   let total = 0;
@@ -40,7 +105,7 @@ async function readResponse(response) {
       total += value.byteLength;
       if (total > MAX_RESPONSE_BYTES) {
         await reader.cancel();
-        throw new Error('Backend response exceeded the allowed size.');
+        throw userFacingError('Backend response exceeded the allowed size.');
       }
 
       chunks.push(value);
@@ -72,7 +137,7 @@ export async function* createTransport({
   model,
   attachments,
   signal
-}, { getToken = getFirebaseIdToken, fetchRequest = fetch } = {}) {
+}, { getToken = getFirebaseIdToken, fetchRequest = fetch, diagnostics = null } = {}) {
   if (signal?.aborted) {
     throw new DOMException('Request cancelled.', 'AbortError');
   }
@@ -98,37 +163,50 @@ export async function* createTransport({
     throw new Error('The attachments are too large to send together. Remove one and try again.');
   }
 
-  const response = await fetchRequest(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`
-    },
-    body: bodyJson,
-    signal
-  });
+  let response;
+  try {
+    response = await fetchRequest(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: bodyJson,
+      signal
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    // No response at all: DNS, TLS, radio, timeout or the Worker being unreachable/killed.
+    reportFailure(diagnostics, payload.attachments ? 'transport.attachments' : 'transport.chat', 'NETWORK_ERROR');
+    throw error;
+  }
 
+  // The response body is read before the status is inspected, because the Worker always explains
+  // a failure in JSON. A non-JSON body therefore means the request never reached application code
+  // (an edge error or a killed isolate), which is reported as such rather than as a parse failure.
   const raw = await readResponse(response);
 
   let data;
   try {
     data = JSON.parse(raw);
   } catch {
-    throw new Error('The backend returned an invalid response.');
+    reportFailure(diagnostics, payload.attachments ? 'transport.attachments' : 'transport.chat', 'NON_JSON_BODY', response.status);
+    throw userFacingError(
+      response.ok
+        ? 'The backend returned an invalid response.'
+        : 'The AI service couldn’t respond. Please try again.'
+    );
   }
 
   if (!response.ok) {
-    const quota = data?.quotaExhausted === true || (response.status === 429 && typeof data?.error === 'string' && data.error.includes('quota'));
-    const message = quota
-      ? QUOTA_EXHAUSTED_MESSAGE
-      : response.status === 401 ? 'Your session has expired. Please sign in again.'
-        : response.status === 429 ? 'Too many requests. Please wait a moment and try again.'
-          : 'The AI service couldn’t respond. Please try again.';
-    throw new Error(message);
+    const category = categoryForStatus(response.status);
+    reportFailure(diagnostics, payload.attachments ? 'transport.attachments' : 'transport.chat', category, response.status);
+    throw userFacingError(messageForFailure(response.status, data));
   }
 
   if (typeof data.reply !== 'string' || !data.reply.trim()) {
-    throw new Error('The backend returned an empty response.');
+    reportFailure(diagnostics, 'transport.reply', 'EMPTY_REPLY', response.status);
+    throw userFacingError('The backend returned an empty response.');
   }
 
   yield data.reply;

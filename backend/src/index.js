@@ -4,6 +4,8 @@ import {
   analyzeImage,
   buildAttachmentContext,
   isQuotaError,
+  logVisionFailure,
+  visionFailureResponse,
   ATTACHMENT_BODY_LIMIT,
   TEXT_ONLY_BODY_LIMIT,
   DEFAULT_ATTACHMENT_PROMPT
@@ -329,14 +331,21 @@ export default {
       try {
         analyses[index] = await analyzeImage(env.AI, attachment, userText);
       } catch (error) {
-        if (error?.code === "AI_QUOTA") {
-          return json({
-            error: "The free daily AI quota is exhausted. It resets at 00:00 UTC.",
-            quotaExhausted: true
-          }, 429, origin);
-        }
-        console.error("Workers AI vision request failed.");
-        return json({ error: "NYX AI couldn't analyse an attached image. Please try again later." }, 502, origin);
+        const status = Number.isInteger(error?.status) ? error.status : null;
+        const providerCode = Number.isInteger(error?.providerCode) ? error.providerCode : null;
+        // One sanitized diagnostic per failed vision call: stage, category, status and the
+        // Workers AI numeric code only. No image, prompt, file name or provider message.
+        logVisionFailure({
+          stage: attachment.ocr ? "vision.ocr_page" : "vision.image",
+          category: error?.code ?? "AI_FAILED",
+          status,
+          providerCode
+        });
+
+        // Distinct, actionable causes get distinct user-facing messages; the body is built from
+        // fixed strings only, so no provider text can ever be forwarded.
+        const { status: failureStatus, body: failureBody } = visionFailureResponse(error?.code ?? "AI_FAILED");
+        return json(failureBody, failureStatus, origin);
       }
     }
     const imageAttachments = attachments.filter((attachment) => attachment.kind === "image");

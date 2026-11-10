@@ -47,8 +47,10 @@ function renderMessageAttachments(attachments) {
 }
 
 const ACTIVE_KEY = 'activeConversation';
+/** Shown when a request fails for a reason the app cannot attribute to a specific cause. */
+const GENERIC_TRANSPORT_FAILURE = 'The reply couldn’t be completed. Check your connection and try again.';
 
-export function initChat({ store, getModelId, storage = null }) {
+export function initChat({ store, getModelId, storage = null, diagnostics = null }) {
   const els = {
     scroller: $('messages'), list: $('message-list'), welcome: $('welcome'), form: $('composer'), input: $('composer-input'),
     send: $('send-btn'), stop: $('stop-btn'), attach: $('attach-btn'), image: $('image-btn'), voice: $('voice-btn'), file: $('file-input'), imageFile: $('image-input'),
@@ -177,7 +179,7 @@ export function initChat({ store, getModelId, storage = null }) {
       if (entry.kind === 'image') {
         entry.processingLabel = 'Compressing…';
         renderAttachments();
-        const result = await downscaleImageFile(entry.file);
+        const result = await downscaleImageFile(entry.file, { diagnostics });
         Object.assign(entry, {
           status: 'ready', data: result.data, mime: result.mime, thumb: result.thumb,
           previewUrl: URL.createObjectURL(entry.file),
@@ -207,7 +209,13 @@ export function initChat({ store, getModelId, storage = null }) {
         }
       }
     } catch (err) {
-      console.error('[NYX] attachment processing failed', err?.message ?? err);
+      // Structured and sanitized: stage, category and attachment kind only. Neither the error
+      // message, the file name nor anything about the file's content is recorded.
+      diagnostics?.record(
+        typeof err?.stage === 'string' ? err.stage : entry.kind === 'image' ? 'image.process' : 'document.process',
+        typeof err?.category === 'string' ? err.category : 'PROCESSING_FAILED',
+        { kind: entry.kind }
+      );
       entry.status = 'error';
       entry.error = err instanceof Error && err.message ? err.message : 'That file couldn’t be processed.';
     }
@@ -279,10 +287,16 @@ export function initChat({ store, getModelId, storage = null }) {
       attachmentResults = step.done && step.value && typeof step.value === 'object' ? step.value.attachmentResults ?? null : null;
     } catch (err) {
       if (err?.name !== 'AbortError') {
-        failure = err?.message === 'Your session has expired. Please sign in again.'
-          || err?.message === 'Too many requests. Please wait a moment and try again.'
-          || err?.message === 'The free daily AI quota is exhausted. It resets at 00:00 UTC.'
-          ? err.message : 'The reply couldn’t be completed. Check your connection and try again.';
+        // A failure the transport has already classified as user-facing (an expired session, a
+        // rate limit, an exhausted free allocation, or a Worker-authored attachment problem such
+        // as "that image is too large to analyse") is shown as-is so the user can act on it.
+        // Anything else — including an unexpected internal error message — keeps the generic
+        // message: internal text must never be presented as an explanation.
+        const described = err instanceof Error
+          && err.userFacing === true
+          && typeof err.message === 'string'
+          && err.message.trim().length > 0;
+        failure = described ? err.message.trim() : GENERIC_TRANSPORT_FAILURE;
       }
     } finally {
       if (abort === controller) abort = null;

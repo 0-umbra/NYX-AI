@@ -89,21 +89,84 @@ export function cleanExtractedText(raw, { maxChars = LIMITS.maxDocumentChars } =
   return { text: `${text.slice(0, maxChars)}\n\n[…truncated to ${maxChars} characters]`, truncated: true };
 }
 
-/** Lazy PDF.js loader; the Worker (vendor/pdf.worker.min.mjs) is copied by scripts/build.js. */
+/**
+ * Lazy PDF.js loader; the Worker (vendor/pdf.worker.min.mjs) is copied by scripts/build.js.
+ *
+ * LIFETIME RULE — read before changing this function. PDF.js takes ownership of `data`:
+ * `getDocument()` hands the underlying ArrayBuffer to its Worker as a *transferable*
+ * (`sendWithPromise("GetDocRequest", params, [data.buffer])`, pdf.mjs), which permanently
+ * detaches the caller's buffer. Any later use of the same ArrayBuffer throws
+ * "Cannot perform Construct on a detached ArrayBuffer".
+ *
+ * So: the caller must always pass bytes that PDF.js may consume. `withPdfBytes()` below does
+ * exactly that, but the rule is enforced here as well — the bytes are copied into a fresh,
+ * exactly-sized Uint8Array at this single boundary. That copy is cheap next to the copy PDF.js
+ * already makes when an input is a view into a larger buffer, and it guarantees that no
+ * document load can ever detach a buffer the caller still needs.
+ */
 async function defaultLoadDocument(data) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.min.mjs');
   // The vendored worker only exists in the built app; in Node tests pdf.js uses a fake worker.
   if (typeof document !== 'undefined') pdfjs.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.mjs';
-  return pdfjs.getDocument({ data, isEvalSupported: false, disableFontFace: true }).promise;
+  const transferable = new Uint8Array(data.byteLength);
+  transferable.set(data);
+  return pdfjs.getDocument({ data: transferable, isEvalSupported: false, disableFontFace: true }).promise;
+}
+
+/**
+ * Normalises the bytes we keep for a PDF into one private, exactly-sized snapshot.
+ *
+ * Returns an "arena" object rather than a bare buffer so ownership is explicit:
+ *  - `length` never changes, even after PDF.js detaches the buffers it was given;
+ *  - `fresh()` returns a NEW independent copy for one document-loading operation;
+ *  - `isDetached()` reports whether the buffer was in fact handed to PDF.js (used by tests).
+ *
+ * Deliberately copies once and only once per PDF. Text extraction and scanned-page rendering
+ * each receive their own copy from `fresh()`, which is the minimum needed to keep the snapshot
+ * intact; nothing is retained after processing. On low-end Android that is two extra copies of
+ * one document (≤ the 10 MB attachment cap → ≤ 20 MB transient), which is why no further
+ * copies are made anywhere in the pipeline.
+ */
+export function withPdfBytes(data) {
+  const source = data instanceof Uint8Array
+    ? data
+    : ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+  const snapshot = new Uint8Array(source.byteLength);
+  snapshot.set(source);
+
+  return {
+    get length() { return snapshot.byteLength; },
+    /** A brand-new copy PDF.js may transfer and detach. Never null, even if a copy was detached. */
+    fresh() {
+      const copy = new Uint8Array(snapshot.byteLength);
+      copy.set(snapshot);
+      return copy;
+    },
+    /** True when at least one buffer previously handed out has been detached. */
+    isDetached() { return snapshot.byteLength === 0; },
+  };
+}
+
+/** Wraps a caller-supplied `loadDocument` so it can never receive (and detach) our snapshot. */
+function isolateLoader(loadDocument) {
+  return (bytes) => loadDocument(bytes.slice());
 }
 
 /**
  * Extracts text from a PDF. Stops as soon as the character budget is reached so a 500-page
  * scan is never fully read. Returns per-document text plus scanned-PDF detection.
+ *
+ * `data` is never handed to PDF.js directly: it is snapshotted and each load gets its own copy,
+ * so the caller can keep using its bytes afterwards (and the scanned-PDF OCR pass can still run).
  */
 export async function extractPdfText(data, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxPdfPages, loadDocument = defaultLoadDocument } = {}) {
-  const doc = await loadDocument(new Uint8Array(data));
+  const bytes = withPdfBytes(data);
+  const load = isolateLoader(loadDocument);
+  const doc = await load(bytes.fresh());
   try {
+
     const pageCount = doc.numPages;
     // Strict page-iteration ceiling: a huge scanned PDF with no text layer must not keep
     // the device busy. Pages beyond the limit are never loaded or read.
@@ -152,12 +215,17 @@ export async function extractDocumentText(fileLike, options = {}) {
 /**
  * Full PDF path: extracts the text layer, and when the PDF turns out to be scanned
  * (no usable text), renders the first LIMITS.maxOcrPages pages for vision-model OCR.
+ *
+ * The file is read ONCE into an arena snapshot that PDF.js can never detach; the text pass and
+ * the OCR pass each consume their own copy. Before this, the text pass handed the single buffer
+ * to PDF.js, PDF.js detached it, and the OCR pass then threw
+ * "Cannot perform Construct on a detached ArrayBuffer" for every PDF (text or scanned).
  */
 export async function processPdfDocument(fileLike, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxOcrPages, loadDocument } = {}) {
-  const buffer = await fileLike.arrayBuffer();
-  const result = await extractPdfText(buffer, { maxChars, loadDocument });
+  const bytes = withPdfBytes(await fileLike.arrayBuffer());
+  const result = await extractPdfText(bytes.fresh(), { maxChars, loadDocument });
   if (!result.likelyScanned) return result;
-  const ocr = await renderPdfPagesToImages(buffer, { maxPages, loadDocument });
+  const ocr = await renderPdfPagesToImages(bytes.fresh(), { maxPages, loadDocument });
   return {
     ...result,
     text: '',
@@ -170,10 +238,12 @@ export async function processPdfDocument(fileLike, { maxChars = LIMITS.maxDocume
 /**
  * Renders the first pages of a scanned PDF to JPEG data URIs for OCR through the vision model.
  * Browser-only: returns { images: [], unavailable: true } where canvas is missing (unit tests).
+ * Every load uses its own copy of the bytes, because PDF.js detaches what it is given.
  */
 export async function renderPdfPagesToImages(data, { maxPages = LIMITS.maxOcrPages, targetWidth = LIMITS.maxImageEdge, loadDocument = defaultLoadDocument } = {}) {
   if (typeof document === 'undefined') return { images: [], unavailable: true };
-  const doc = await loadDocument(new Uint8Array(data));
+  const bytes = withPdfBytes(data);
+  const doc = await isolateLoader(loadDocument)(bytes.fresh());
   try {
     const images = [];
     const pages = Math.min(doc.numPages, maxPages);
@@ -196,13 +266,45 @@ export async function renderPdfPagesToImages(data, { maxPages = LIMITS.maxOcrPag
 }
 
 /**
+ * Safe, structured diagnostics for the on-device attachment stages.
+ *
+ * Records only what is needed to locate a failure: a fixed stage name, a failure category, a
+ * bounded set of numeric sizes and — for transport failures — the HTTP status. It never records
+ * the image, its data URI or base64 payload, the file name, any document text, the Firebase ID
+ * token or anything else that identifies the user or the file. Emission is swappable so tests can
+ * assert both what is recorded and what is never recorded.
+ */
+export function createAttachmentDiagnostics({ emit = (record) => console.warn('[NYX]', record) } = {}) {
+  const record = (stage, category, details = {}) => {
+    try {
+      emit({
+        event: 'nyx.attachment',
+        stage: String(stage),
+        category: String(category),
+        ...details,
+      });
+    } catch {
+      // Diagnostics must never break attachment processing.
+    }
+  };
+  return { record };
+}
+
+/**
  * Decodes, downscales to maxImageEdge and re-encodes an image. Prefers PNG when the source was
  * a PNG and stays under the byte budget (screenshots with text stay lossless); otherwise JPEG.
  * Also emits a tiny thumbnail for the conversation UI. Throws with a user-safe message on failure.
  */
-export async function downscaleImageFile(fileLike, { maxEdge = LIMITS.maxImageEdge, maxBytes = LIMITS.maxImageBytes } = {}) {
+export async function downscaleImageFile(fileLike, { maxEdge = LIMITS.maxImageEdge, maxBytes = LIMITS.maxImageBytes, diagnostics = null } = {}) {
+  const stageFailure = (stage, category, message) => {
+    diagnostics?.record(stage, category);
+    const error = new Error(message);
+    error.stage = stage;
+    error.category = category;
+    return error;
+  };
   if (typeof createImageBitmap !== 'function' && typeof Image === 'undefined') {
-    throw new Error('Image processing is not available in this environment.');
+    throw stageFailure('image.decode', 'DECODER_UNAVAILABLE', 'Image processing is not available in this environment.');
   }
   const sourceType = String(fileLike.type ?? '').toLowerCase();
   let bitmap;
@@ -211,12 +313,12 @@ export async function downscaleImageFile(fileLike, { maxEdge = LIMITS.maxImageEd
       bitmap = await createImageBitmap(fileLike);
     }
   } catch {
-    throw new Error('That image could not be read. It may be corrupt or an unsupported format.');
+    throw stageFailure('image.decode', 'DECODE_FAILED', 'That image could not be read. It may be corrupt or an unsupported format.');
   }
-  if (!bitmap) throw new Error('That image could not be read. It may be corrupt or an unsupported format.');
+  if (!bitmap) throw stageFailure('image.decode', 'DECODE_FAILED', 'That image could not be read. It may be corrupt or an unsupported format.');
 
   const canvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
-  if (!canvas) throw new Error('Image processing is not available in this environment.');
+  if (!canvas) throw stageFailure('image.encode', 'CANVAS_UNAVAILABLE', 'Image processing is not available in this environment.');
   const ctx = canvas.getContext('2d');
 
   const encode = (width, height) => {
@@ -248,7 +350,7 @@ export async function downscaleImageFile(fileLike, { maxEdge = LIMITS.maxImageEd
     const candidate = tryEncode(edge, type, quality);
     if (candidate.bytes <= maxBytes) { result = candidate; break; }
   }
-  if (!result) throw new Error('That image stays too large even after compression. Try a smaller one.');
+  if (!result) throw stageFailure('image.encode', 'TOO_LARGE_AFTER_COMPRESSION', 'That image stays too large even after compression. Try a smaller one.');
 
   // A small persisted thumbnail so previous images remain visible in history.
   let thumb = null;

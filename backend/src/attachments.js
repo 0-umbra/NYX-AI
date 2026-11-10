@@ -85,15 +85,24 @@ export function decodeDataUriImage(dataUri) {
   if (payload.length % 4 !== 0) {
     return { ok: false, error: "An attached image is not valid base64 data." };
   }
-  let bytes;
+  let binary;
   try {
-    const binary = atob(payload);
-    bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    binary = atob(payload);
   } catch {
     return { ok: false, error: "An attached image is not valid base64 data." };
   }
-  if (bytes.length === 0) return { ok: false, error: "An attached image is empty." };
-  if (bytes.length > MAX_IMAGE_BYTES) return { ok: false, error: "An attached image is too large." };
+  if (binary.length === 0) return { ok: false, error: "An attached image is empty." };
+  if (binary.length > MAX_IMAGE_BYTES) return { ok: false, error: "An attached image is too large." };
+  // PERF: this runs on Workers Free, where a request may use only 10 ms of CPU. Decoding the
+  // payload with `Uint8Array.from(binary, (c) => c.charCodeAt(0))` -- the obvious form -- invokes
+  // a JS callback once per byte: ~55 ms for a 1 MiB payload, which alone is 5x the whole CPU
+  // budget and makes every image request die with Cloudflare's "Worker exceeded resource limits"
+  // (a non-JSON body, which the app can only report as a generic failure). A plain indexed loop
+  // does the same work in ~1.4 ms. The bytes, and therefore the magic-byte check, are unchanged.
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
   if (!magicMatches(bytes, mime)) {
     return { ok: false, error: "An attached image's contents do not match its file type." };
   }
@@ -187,10 +196,104 @@ export function buildVisionQuestion(attachment, userText) {
 }
 
 export class VisionError extends Error {
-  constructor(message, code) {
+  constructor(message, code, { status = null, providerCode = null } = {}) {
     super(message);
     this.name = "VisionError";
-    this.code = code; // 'AI_QUOTA' | 'AI_EMPTY' | 'AI_FAILED' | 'AI_TIMEOUT'
+    this.code = code; // 'AI_QUOTA' | 'AI_EMPTY' | 'AI_FAILED' | 'AI_TIMEOUT' | 'AI_BAD_RESPONSE'
+    this.status = status; // HTTP-like status reported by the provider, when it exposes one
+    this.providerCode = providerCode; // numeric Workers AI error code, when it exposes one
+  }
+}
+
+/**
+ * Classifies a provider failure into a sanitized category without keeping any of its text.
+ *
+ * Provider errors can embed the request (image bytes, prompt text), so nothing from them is
+ * forwarded, logged verbatim or returned to the client. Only a fixed category, the status code
+ * and the Workers AI error code (both safe integers) survive. Categories deliberately cover the
+ * documented Workers AI error table: a missing model, a payload the model rejects, a plan/quota
+ * gate, a CPU-limit kill, a timeout and out-of-capacity are all distinct causes that need
+ * different fixes, yet all of them previously collapsed into one opaque 502.
+ */
+export function classifyVisionFailure(error) {
+  const haystack = [error?.message, error?.code, error?.status, error?.statusCode, error?.name]
+    .filter((part) => part != null && part !== "")
+    .join(" ");
+  const statusPart = Number(error?.status ?? error?.statusCode);
+  const status = Number.isInteger(statusPart) && statusPart >= 100 && statusPart <= 599 ? statusPart : null;
+  const codeMatch = /(?:^|\D)(5\d{3})(?:\D|$)/.exec(haystack);
+  const providerCode = codeMatch ? Number(codeMatch[1]) : null;
+
+  if (isQuotaError(error) || providerCode === 3036 || status === 429) {
+    // 3040 "out of capacity" is a transient 429, not an exhausted daily allocation: it must not
+    // be reported to the user as "quota exhausted, resets at 00:00 UTC".
+    if (/out of capacity|3040/i.test(haystack)) return { category: "AI_OUT_OF_CAPACITY", status: 429, providerCode: 3040 };
+    return { category: "AI_QUOTA", status: status ?? 429, providerCode: providerCode ?? 3036 };
+  }
+  if (providerCode === 5035) return { category: "AI_PLAN_REQUIRED", status: 403, providerCode };
+  if (providerCode === 5007 || providerCode === 3042) return { category: "AI_MODEL_UNAVAILABLE", status: 400, providerCode };
+  if (providerCode === 5028) return { category: "AI_MODEL_DEPRECATED", status: 410, providerCode };
+  if (providerCode === 5004) return { category: "AI_INVALID_IMAGE_DATA", status: 400, providerCode };
+  if (providerCode === 3006 || status === 413) return { category: "AI_REQUEST_TOO_LARGE", status: 413, providerCode };
+  if (providerCode === 3007 || providerCode === 3008 || status === 408) return { category: "AI_TIMEOUT", status: 408, providerCode };
+  if (status === 400) return { category: "AI_BAD_REQUEST", status, providerCode };
+  if (status === 401 || status === 403) return { category: "AI_FORBIDDEN", status, providerCode };
+  if (/exceeded resource limits|1102|out of memory/i.test(haystack)) return { category: "AI_RESOURCE_LIMIT", status, providerCode };
+  return { category: "AI_FAILED", status, providerCode };
+}
+
+/**
+ * Emits one structured, sanitized line for a failed vision stage.
+ *
+ * Never includes the image, the data URI, the question, the user's text, the file name or any
+ * part of the provider's message — only the stage, the failure category, the status code and
+ * the Workers AI numeric code. Emitted once per failed call, never per page or per attachment.
+ */
+export function logVisionFailure(diagnostic, { logger = console, sampleRate = 1 } = {}) {
+  if (typeof diagnostic?.category !== "string") return;
+  if (!(Math.random() < sampleRate)) return;
+  const record = {
+    event: "nyx.vision.failed",
+    stage: String(diagnostic.stage ?? "vision"),
+    category: diagnostic.category,
+    status: Number.isInteger(diagnostic.status) ? diagnostic.status : null,
+    providerCode: Number.isInteger(diagnostic.providerCode) ? diagnostic.providerCode : null,
+  };
+  try {
+    logger.error(JSON.stringify(record));
+  } catch {
+    // Logging must never fail the request.
+  }
+}
+
+/**
+ * Maps a vision failure category to the exact JSON response the client receives.
+ *
+ * Kept as a pure function so every mapping is directly testable, and so the route cannot drift
+ * into forwarding provider text: the body is built only from fixed strings.
+ */
+export function visionFailureResponse(code) {
+  switch (code) {
+    case "AI_QUOTA":
+      return { status: 429, body: { error: "The free daily AI quota is exhausted. It resets at 00:00 UTC.", quotaExhausted: true } };
+    case "AI_PLAN_REQUIRED":
+      return { status: 503, body: { error: "Image understanding is unavailable on the current Cloudflare plan." } };
+    case "AI_MODEL_UNAVAILABLE":
+    case "AI_MODEL_DEPRECATED":
+      return { status: 503, body: { error: "Image understanding is temporarily unavailable." } };
+    case "AI_REQUEST_TOO_LARGE":
+    case "AI_RESOURCE_LIMIT":
+      return { status: 413, body: { error: "That image is too large to analyse. Try a smaller one." } };
+    case "AI_INVALID_IMAGE_DATA":
+      return { status: 415, body: { error: "That image could not be analysed. Try a different image." } };
+    case "AI_TIMEOUT":
+    case "AI_OUT_OF_CAPACITY":
+      return { status: 503, body: { error: "Image understanding is busy right now. Please try again in a moment.", retryable: true } };
+    case "AI_BAD_RESPONSE":
+    case "AI_EMPTY":
+      return { status: 502, body: { error: "NYX AI couldn’t read that image. Try a different image." } };
+    default:
+      return { status: 502, body: { error: "NYX AI couldn't analyse an attached image. Please try again later." } };
   }
 }
 
@@ -212,17 +315,30 @@ export async function analyzeImage(ai, attachment, userText, { timeoutMs = VISIO
       }),
       timeout
     ]);
-    const answer = typeof result?.answer === "string" ? result.answer.trim() : "";
+    // Documented output: `answer` for the query task. A 200 response with no answer, or with a
+    // non-string answer, is a malformed provider response and is reported as such — it is not an
+    // empty model reply (those surface as a blank string and are a different cause).
+    if (result === null || typeof result !== "object" || Array.isArray(result)) {
+      throw new VisionError("The vision model returned an unexpected response.", "AI_BAD_RESPONSE");
+    }
+    if (!("answer" in result)) {
+      throw new VisionError("The vision model returned an unexpected response.", "AI_BAD_RESPONSE");
+    }
+    if (typeof result.answer !== "string") {
+      throw new VisionError("The vision model returned an unreadable answer.", "AI_BAD_RESPONSE");
+    }
+    const answer = result.answer.trim();
     if (!answer) throw new VisionError("The vision model returned an empty response.", "AI_EMPTY");
     return answer.slice(0, MAX_ANALYSIS_CHARS);
   } catch (error) {
     if (error instanceof VisionError) throw error;
-    if (isQuotaError(error)) throw new VisionError("The free daily AI allocation is exhausted.", "AI_QUOTA");
-    throw new VisionError("The vision model failed.", "AI_FAILED");
+    const failure = classifyVisionFailure(error);
+    throw new VisionError("The vision model failed.", failure.category, failure);
   } finally {
     clearTimeout(timer);
   }
 }
+
 
 /**
  * Server-side context block appended to the newest user message for the language model only.
