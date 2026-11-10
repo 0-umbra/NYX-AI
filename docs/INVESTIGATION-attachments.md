@@ -109,7 +109,13 @@ Pre-PR, a PDF-extraction failure is a **composer chip error** and blocks the sen
 the transport, so it cannot yield a 502 body. (This is also the confirmation of the PR's PDF root
 cause: long-text PDFs work, scanned and short-text PDFs throw.)
 
-### F8 — The likely failing stage: request-size / CPU cost of the image path
+### F8 — REFUTED (kept for the record): the request-size / CPU cost of the image path
+
+> **Status: refuted by production evidence.** This was the leading hypothesis before the first real
+> capture. The 2026-11-10 log shows the Worker emitting its own error line and returning a 502, which
+> a CPU-killed isolate cannot do. The measurements below are still valid — the base64 decode really
+> did cost 56–102 ms, and the fix that followed is real — but **CPU exhaustion is not the cause of
+> the image failures.** See the addendum at the end of this document.
 
 Measured locally on the **production** `validateAttachments`/`decodeDataUriImage` code
 (Node 22, warm, per request, JSON body already built):
@@ -136,7 +142,12 @@ Two other facts point the same way:
 
 ## 2. Hypotheses (ranked, with what would confirm each)
 
-### H1 (most likely) — the base64 decode + payload handling exceeds the Workers Free CPU budget, so the platform kills the request
+### H1 — REFUTED by the 2026-11-10 capture — the base64 decode + payload handling exceeds the Workers Free CPU budget
+
+> **Do not read this as the cause.** Production logs show `Workers AI vision request failed.` — a
+> line this code reaches only *after* base64 decoding and validation succeed — followed by a 502.
+> A CPU-killed Worker is terminated and cannot log and respond. The reasoning below is retained only
+> to show what was believed before evidence arrived.
 
 *Why it fits:* the decode cost is 56–102 ms against a documented 10 ms budget, and it scales with
 image size; text-only requests do none of this work (0.02 ms) which is why chat is unaffected. A CPU
@@ -144,12 +155,11 @@ or memory kill returns Cloudflare's own error page, and the PR #12 frontend maps
 non-quota response to… the very message observed. It also explains **both** attachment types, since
 scanned-PDF OCR pages travel through the same image path.
 
-*Confirm with:* `wrangler tail` during one failing request. Absence of the Worker's
-`console.error("Workers AI vision request failed.")` line together with an invocation outcome of
-`exceededCpu` would settle it. The PR #13 `nyx.vision.failed` structured record would show a
-category instead if the request did reach the vision call.
+*Status: the capture showed the Worker's own `console.error("Workers AI vision request failed.")`
+line, so the request **did** reach the vision call. H1 is out. What remains unknown is *which*
+provider failure it was — the deployed code cannot distinguish them.
 
-### H2 — the provider call itself fails, and PR #12 collapses every cause into this one message
+### H2 — CONFIRMED as the failing stage, cause still unknown — the provider call fails, and PR #12 collapses every cause into one message
 
 `analyzeImage` in production throws `AI_FAILED` for *any* non-quota error, and the route maps
 `AI_FAILED` to this string. Candidate provider causes that the code cannot currently distinguish:

@@ -104,14 +104,18 @@ Not the same cause as the PDF bug. Two separate defects were found:
    once as a sanitized structured record (stage, category, status, Workers AI numeric code only)
    and mapped to distinct, actionable, sanitized messages.
 
-**The Cloudflare CPU-limit explanation is a hypothesis, not a measurement.** The Workers Free plan
-documents a 10 ms per-request CPU limit, so a 104–149 ms decode is far outside the budget and is a
-plausible cause of the observed generic failure (a CPU kill returns a non-JSON edge error, and the
-old frontend showed its generic message for exactly that). But no CPU figure from the deployed
-Worker was captured here, and the observed failure could equally have come from the vision call
-itself or from another cause. The diagnostics added in this PR are what will distinguish them on
-the first real request (`wrangler tail` shows `nyx.vision.failed` with a category, or its absence
-shows the request never reached application code).
+**The Cloudflare CPU-limit explanation has been REFUTED by production evidence.** The 56–102 ms
+decode cost measured here is real, and the indexed-loop fix is a genuine improvement, but CPU
+exhaustion is **not** what broke image analysis. A production capture (2026-11-10 12:29 IST) shows
+the Worker emitting its own line, `Workers AI vision request failed.` — which this code reaches only
+*after* base64 decoding and validation succeed — and then returning a 502. A CPU-killed isolate is
+terminated and cannot log and respond.
+
+What the capture establishes: the request reached the vision call, so auth, body limits, JSON
+parsing, attachment validation, base64 decoding and the magic-byte check all passed. What it cannot
+establish: *why* the provider call failed, because the deployed code maps seven distinct causes onto
+that one string. **Real production image inference therefore remains unverified and unfixed.** The
+diagnostics in this PR are what will identify the cause on the first failing request after deploy.
 
 **Not verified at all:** live Workers AI / Moondream inference. There are no Cloudflare credentials
 or network access to the Worker here, so no real image inference was performed. Tests use a mocked
