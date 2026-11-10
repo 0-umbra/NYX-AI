@@ -1,5 +1,21 @@
 name: Deploy NYX AI Worker
 
+# DEPLOYMENT SAFETY NOTE
+# ----------------------
+# This workflow used to deploy as soon as a push landed on `develop`, running no tests in the
+# deploy job itself (CI ran separately, in parallel, and could not block it). A backend change
+# that broke the Worker could therefore reach production before CI had said a word about it.
+#
+# The two gates below close that hole without redesigning anything:
+#   1. `verify` reuses the existing `cloudflare-check.yml` workflow, unmodified, via
+#      `workflow_call`. That workflow already runs the frontend tests, the frontend build, the
+#      backend tests and a `wrangler deploy --dry-run`. Nothing in it is weakened or duplicated.
+#   2. `deploy` declares `needs: verify`, so it cannot start — let alone run `wrangler deploy` —
+#      unless `verify` succeeded.
+#
+# The deploy job also now checks out the exact commit that was verified (`github.sha`) instead of
+# re-reading a branch tip that could move in between, so what is tested is what is shipped.
+
 on:
   push:
     branches:
@@ -12,14 +28,19 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    # Reuses the existing check workflow as-is. No steps are copied, so the two cannot drift.
+    uses: ./.github/workflows/cloudflare-check.yml
+
   deploy:
+    needs: verify
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout develop
+      - name: Checkout the verified commit
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -3,6 +3,10 @@ name: Cloudflare Worker Check
 on:
   push:
     branches: [develop]
+  # Allows cloudflare-deploy.yml to reuse this exact check as a gate before deploying. Declaring
+  # the trigger adds no steps and changes no behaviour; the workflow keeps running on every push
+  # to develop exactly as before.
+  workflow_call:
 
 permissions:
   contents: read

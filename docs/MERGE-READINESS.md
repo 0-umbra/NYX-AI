@@ -81,7 +81,7 @@ count (2 for a text PDF, 3 for a scanned one, never per page) and that the snaps
 
 | Check | Result |
 | --- | --- |
-| `npm test` (frontend + static) | **200 / 200 passed** |
+| `npm test` (frontend + static) | **215 / 215 passed** |
 | `cd backend && npm test` | **97 / 97 passed** |
 | `npm run build` | Built `www/` |
 | `wrangler deploy --dry-run` | Compiled, 28.92 KiB |
@@ -110,7 +110,25 @@ only — never the token, body, attachments, base64 or file names. The only pre-
 **Verified by the repo's own hygiene test**, which scans for secrets: it caught a JWT-shaped fixture I
 had written and I rebuilt it at runtime rather than weakening the check.
 
-### One residual exposure worth knowing (not a leak today)
+### RESOLVED — the relay gate is now an allowlist
+
+_This section described the earlier pattern-based gate as a residual risk. It has since been
+replaced; the original text is kept below for the record._
+
+The relay no longer pattern-matches. `messageForFailure()` uses the server's `error` string **only
+as a lookup key** into `KNOWN_FAILURE_MESSAGES` — an exact, whole-string match against sentences the
+app ships. Anything else, including every provider string, falls back to a fixed sentence. This
+cannot be talked around, and it fails closed: a new Worker message shows the generic sentence until
+it is added deliberately.
+
+Adversarial tests (data URI, base64 blob, filename, prompt, JWT, provider codes, every HTTP status)
+were run against the **old** gate first and **failed 3 of them**, confirming the exposure was real
+rather than theoretical. Reverting the allowlist to a keyword relay fails those same 3 tests.
+
+A derived-list test reads the Worker's own source and fails if any of its fixed `error` strings is
+missing from the frontend allowlist, so the two cannot drift apart silently.
+
+### Original (superseded) note
 
 `transport.js` relays a Worker `error` string to the user if it is ≤200 chars, contains no
 `\n\r\t<>{}[]`$\\`, **and** matches a keyword list (`image`, `file`, `request`, …). I probed this
@@ -166,13 +184,28 @@ The PDF failure **is** fixed.
 
 ---
 
+## Deployment safety gate
+
+`.github/workflows/cloudflare-deploy.yml` now has two jobs:
+
+- **`verify`** — reuses `cloudflare-check.yml` unchanged via `workflow_call` (frontend tests, build,
+  backend tests, `wrangler deploy --dry-run`);
+- **`deploy`** — declares `needs: verify`, so it cannot start unless verification succeeded, and
+  checks out `github.sha` (the commit that was verified) instead of a branch tip that could move.
+
+`cloudflare-check.yml` gained only a `workflow_call:` trigger — no steps added, removed or weakened;
+it still runs on every push to `develop` exactly as before. Six tests in
+`tests/unit/deploy-gate.test.js` pin the gate; removing `needs: verify`, or reverting the checkout to
+a moving ref, each fails a test.
+
 ## Remaining risks
 
 1. **The PR does not fix the reported image failure.** Merging will not restore image analysis. If
    that expectation is not explicit, this could read as a failed fix.
-2. **Merging deploys immediately and automatically** — there is no separate approval step, and the
-   deploy workflow runs no tests first (CI runs on the PR, not in the deploy job). Merging is
-   deploying.
+2. **Merging deploys immediately and automatically** — there is still no manual approval step, but
+   the deploy job now cannot run until the reuse-gate workflow has passed. Merging is still
+   deploying, now with a test gate in front of it. _(Residual: `workflow_call` requires the reusable
+   workflow to exist on the default branch — see the note in the deploy workflow.)_
 3. **One production deploy of unverified-in-production error paths.** The new mappings
    (415/413/503) have unit coverage but have never served real traffic. The blast radius is failures
    only — a successful request is unaffected — but a mistake here changes what users see when things
@@ -181,8 +214,9 @@ The PDF failure **is** fixed.
    `transport.js` expects the new Worker messages; the new Worker's messages are all
    backward-compatible (old frontend shows its generic text), so skew is safe in both directions, but
    the improved messages only appear in a new APK build.
-5. **The relay gate is keyword-fragile** (section 6). Safe only while backend messages stay literals.
-   A future PR that relays provider text through `error` would leak it to the user's screen.
+5. ~~The relay gate is keyword-fragile~~ — **resolved**: it is now a closed allowlist, with
+   adversarial and anti-drift tests. Residual: a new Worker message will show the generic sentence
+   until it is added to `KNOWN_FAILURE_MESSAGES` (fails closed, and the derivation test flags it).
 6. **`AI_EMPTY` / `AI_BAD_RESPONSE` can still mean a legitimately blank answer** for a blank image.
    Not distinguishable from a fault without seeing the image; not claimed to be.
 7. **Draft status.** The PR is still a draft; it cannot be merged until marked ready.

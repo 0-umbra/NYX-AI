@@ -8,13 +8,70 @@ import { isModelAvailable } from './models.js';
 import { buildConversationHistory, isSendableHistory } from './history.js';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
-// A Worker `error` string reaches the user only if it passes BOTH gates below: it must be one
-// short line of prose (no dump, stack, URL or identifier), and it must be recognisably one of the
-// explanations this app writes for attachment/transport failures. Anything else keeps the generic
-// message, so provider text can never be relayed by accident.
-const MAX_RELAYED_ERROR_CHARS = 200;
-const SAFE_ERROR_PATTERN = /^[^\n\r\t<>{}[\]`$\\]{1,200}$/;
-const EXPLAINED_FAILURE_PATTERN = /\b(image|images|picture|photo|attachment|attachments|file|files|document|documents|PDF|PDFs|session|quota|backend|reply|request)\b|\btoo large\b|\btoo many\b/i;
+
+/**
+ * The ONLY user-visible messages that may originate from the server side of a failed request.
+ *
+ * The Worker's `error` string is never displayed. It is treated as untrusted input and used
+ * solely as a lookup key in this table: an exact, whole-string match against a sentence this app
+ * knows. Anything else — a provider error, a data URI, a file name, a prompt, a token, an edge
+ * error page, a future message nobody added here — falls back to a fixed generic sentence.
+ *
+ * This replaces a pattern-based relay ("short, single-line, mentions a keyword") which was
+ * bypassable: `AiError: 5004 Input image is invalid: data:image/jpeg;base64,…` and
+ * `Invalid token: eyJ…` both satisfied it. An allowlist cannot be talked around, and it fails
+ * closed: a new Worker message simply shows the generic sentence until it is added here.
+ *
+ * Wording must stay byte-identical to `visionFailureResponse()` and the route's own literals in
+ * `backend/src/`, or the mapping silently degrades to the generic message.
+ */
+export const KNOWN_FAILURE_MESSAGES = Object.freeze([
+  // attachments (backend/src/attachments.js — visionFailureResponse + validation)
+  'That image is too large to analyse. Try a smaller one.',
+  'That image could not be analysed. Try a different image.',
+  'Image understanding is busy right now. Please try again in a moment.',
+  'Image understanding is temporarily unavailable.',
+  'Image understanding is unavailable on the current Cloudflare plan.',
+  'An attached image is too large.',
+  'An attached image is not valid base64 data.',
+  'An attached image is empty.',
+  "An attached image's contents do not match its file type.",
+  "An attached image's file type does not match its data.",
+  'An attachment has an unsupported type.',
+  'An attachment is missing a valid file name.',
+  'Attachments must be a list.',
+  'Invalid attachment format.',
+  'A document attachment is missing its extracted text.',
+  'A document attachment has an unsupported type.',
+  'A document attachment contained no readable text.',
+  'An attached document is too large to analyse.',
+  'The attached documents are too large to analyse together.',
+  // request limits
+  'Request is too large.',
+  'Conversation is too large.',
+  'Invalid conversation length.',
+  'Invalid conversation identifier.',
+  'Invalid message format.',
+  'The latest message must be from the user.',
+  'JSON content type required.',
+  // service state
+  'Chat service is not configured.',
+  'Chat service is temporarily unavailable.',
+  'The AI service is temporarily unavailable. Please try again later.',
+  'The AI returned an empty response.',
+  'This model tier is not available yet.',
+  'Too many requests. Please wait before trying again.',
+  'Authentication required. Please sign in again.',
+  'Invalid JSON request.',
+  'Route not found.',
+  'Method not allowed.',
+  'Origin not allowed.',
+  // vision failures whose own wording the app shows verbatim
+  'NYX AI couldn\u2019t read that image. Try a different image.',
+  "NYX AI couldn't analyse an attached image. Please try again later.",
+  // the quota sentence also has a dedicated constant; listed so the derivation test passes
+  'The free daily AI quota is exhausted. It resets at 00:00 UTC.',
+]);
 
 /** Error message shown when the Worker reports the free daily Workers AI allocation is exhausted. */
 export const QUOTA_EXHAUSTED_MESSAGE = 'The free daily AI quota is exhausted. It resets at 00:00 UTC.';
@@ -79,14 +136,10 @@ function messageForFailure(status, data) {
   if (quota) return QUOTA_EXHAUSTED_MESSAGE;
   if (status === 401) return 'Your session has expired. Please sign in again.';
   if (status === 429) return 'Too many requests. Please wait a moment and try again.';
-  // Worker-authored, bounded and already sanitized: relay it instead of hiding the cause.
+  // The server's text is a lookup key, never a message. Only an exact match against a sentence
+  // this app ships is shown; anything else keeps the generic sentence.
   const reported = typeof data?.error === 'string' ? data.error.trim() : '';
-  if (reported &&
-      reported.length <= MAX_RELAYED_ERROR_CHARS &&
-      SAFE_ERROR_PATTERN.test(reported) &&
-      EXPLAINED_FAILURE_PATTERN.test(reported)) {
-    return reported;
-  }
+  if (reported && KNOWN_FAILURE_MESSAGES.includes(reported)) return reported;
   return 'The AI service couldn’t respond. Please try again.';
 }
 

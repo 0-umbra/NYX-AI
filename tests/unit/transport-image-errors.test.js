@@ -201,3 +201,112 @@ test('an oversized backend response is bounded and reported', async () => {
   const { error } = await run({ fetchRequest: async () => new Response(big, { status: 200 }) });
   assert.equal(error.message, 'Backend response exceeded the allowed size.');
 });
+
+// --- adversarial: relayed text can never carry user or provider data ---------------------------
+//
+// The relay used to accept any Worker `error` string that was short, single-line and contained a
+// relevant keyword. Probed with realistic payloads, strings such as
+//   `AiError: 5004 Input image is invalid: data:image/jpeg;base64,/9j/...`
+// and `Invalid token: eyJhbGci...` passed all three gates. That was only safe because the Worker
+// happens to write fixed literals — safety must not depend on the server's good behaviour.
+
+/**
+ * Every sentence the app itself may show for a failed request. Any message outside this set means
+ * server-authored text reached the screen.
+ */
+const FIXED_MESSAGES = [
+  'That image is too large to analyse. Try a smaller one.',
+  'That image could not be analysed. Try a different image.',
+  'Image understanding is busy right now. Please try again in a moment.',
+  'Image understanding is temporarily unavailable.',
+  'Image understanding is unavailable on the current Cloudflare plan.',
+  'NYX AI couldn\u2019t read that image. Try a different image.',
+  "NYX AI couldn't analyse an attached image. Please try again later.",
+  'The AI service couldn\u2019t respond. Please try again.',
+  'Your session has expired. Please sign in again.',
+  'Too many requests. Please wait a moment and try again.',
+];
+
+/** Everything a leaked message could contain, gathered once. */
+const LEAKY_STRINGS = {
+  dataUri: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL',
+  base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  filename: 'my-passport-scan.jpg',
+  prompt: 'what is the passport number of John Smith',
+  jwt: 'eyJhbGciOiJSUzI1NiIsImtpZCI6ImsifQ.eyJzdWIiOiJ1MSJ9.c2lnbmF0dXJl',
+  providerCode: 'AiError: 5004 Invalid data type',
+  bucket: '/accounts/secret-bucket',
+};
+
+test('adversarial: a data-URI or base64 payload in the error field is never shown', async () => {
+  for (const body of [
+    { error: `AiError: 5004 Input image is invalid: ${LEAKY_STRINGS.dataUri}` },
+    { error: `failed to decode image: ${LEAKY_STRINGS.base64}` },
+    { error: `That image could not be analysed: ${LEAKY_STRINGS.dataUri}` },
+  ]) {
+    const { error } = await run({ fetchRequest: async () => okJson(body, 415) });
+    // Untrusted text never becomes the message; a fixed sentence from the app's own set does.
+    assert.ok(FIXED_MESSAGES.includes(error.message), `unexpected message: ${error.message}`);
+    assert.equal(error.userFacing, true);
+    for (const leak of [LEAKY_STRINGS.dataUri, '/9j/4AAQ', 'iVBORw0KGgo', 'base64']) {
+      assert.equal(error.message.includes(leak), false, `must not include ${leak.slice(0, 12)}`);
+    }
+  }
+});
+
+test('adversarial: a filename or prompt in the error field is never shown', async () => {
+  for (const body of [
+    { error: `Could not read ${LEAKY_STRINGS.filename}` },
+    { error: `The file ${LEAKY_STRINGS.filename} contains ${LEAKY_STRINGS.prompt}` },
+    { error: `attachment ${LEAKY_STRINGS.filename} is too large` },
+  ]) {
+    const { error } = await run({ fetchRequest: async () => okJson(body, 413) });
+    assert.ok(FIXED_MESSAGES.includes(error.message), `unexpected message: ${error.message}`);
+    assert.equal(error.message.includes(LEAKY_STRINGS.filename), false);
+    assert.equal(error.message.includes('passport'), false);
+    assert.equal(error.message.includes('John Smith'), false);
+  }
+});
+
+test('adversarial: a JWT-shaped string in the error field is never shown', async () => {
+  for (const body of [
+    { error: `Invalid token: ${LEAKY_STRINGS.jwt}` },
+    { error: `Bearer ${LEAKY_STRINGS.jwt} rejected` },
+  ]) {
+    const { error } = await run({ fetchRequest: async () => okJson(body, 401) });
+    assert.equal(error.message, 'Your session has expired. Please sign in again.');
+    assert.equal(error.message.includes('eyJ'), false);
+  }
+});
+
+test('adversarial: every status maps to a fixed message, never the server string', async () => {
+  // Exhaustive over the statuses the Worker and its edge can return. Each must produce one of the
+  // app's own fixed sentences, so no server-authored text can reach the screen.
+  const seen = new Set();
+  for (const status of [400, 401, 403, 404, 408, 413, 415, 422, 429, 500, 502, 503, 504]) {
+    const { error } = await run({
+      fetchRequest: async () => okJson({ error: `${LEAKY_STRINGS.filename} ${LEAKY_STRINGS.dataUri}` }, status),
+    });
+    assert.ok(error, `${status} throws`);
+    assert.equal(error.userFacing, true);
+    assert.equal(error.message.includes('passport'), false, `${status} must not leak the filename`);
+    assert.equal(error.message.includes('data:image'), false, `${status} must not leak the data URI`);
+    seen.add(error.message);
+  }
+  // A small, closed set of messages — not one per status.
+  assert.ok(seen.size <= 6, `expected a fixed message set, saw ${seen.size}`);
+});
+
+test('adversarial: nothing user-derived is ever logged for a failed request', async () => {
+  const diagnostics = collector();
+  await run({
+    diagnostics,
+    fetchRequest: async () => okJson({ error: `${LEAKY_STRINGS.filename} ${LEAKY_STRINGS.jwt}` }, 415),
+  });
+  const logged = JSON.stringify(diagnostics.records);
+  for (const leak of [LEAKY_STRINGS.filename, LEAKY_STRINGS.jwt, LEAKY_STRINGS.dataUri, 'eyJ']) {
+    assert.equal(logged.includes(leak), false, `diagnostics must not log ${leak.slice(0, 12)}`);
+  }
+  // Only fixed categories and a numeric status are recorded.
+  assert.deepEqual(diagnostics.records, [{ stage: 'transport.attachments', category: 'UNSUPPORTED_MEDIA', status: 415 }]);
+});
