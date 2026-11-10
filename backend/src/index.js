@@ -1,11 +1,19 @@
 import { buildConversationMessages, SYSTEM_PROMPT } from "./conversation.js";
+import {
+  validateAttachments,
+  analyzeImage,
+  buildAttachmentContext,
+  isQuotaError,
+  ATTACHMENT_BODY_LIMIT,
+  TEXT_ONLY_BODY_LIMIT,
+  DEFAULT_ATTACHMENT_PROMPT
+} from "./attachments.js";
 
 const PROJECT_ID = "nyx-ai-1617b";
 const ISSUER = `https://securetoken.google.com/${PROJECT_ID}`;
 const JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 const ALLOWED_ORIGIN = "https://localhost";
 
-const MAX_BODY_BYTES = 64 * 1024;
 const CLOCK_TOLERANCE = 60;
 const FREE_MODEL = "@cf/zai-org/glm-4.7-flash";
 
@@ -146,9 +154,14 @@ async function verifyFirebaseToken(request) {
   return claims.sub;
 }
 
-async function readLimitedBody(request) {
+/**
+ * Reads the body with a hard streaming cap. The cap is always bounded: text-only requests are
+ * re-checked against TEXT_ONLY_BODY_LIMIT after parsing (attachments payloads get the wider,
+ * still strict, ATTACHMENT_BODY_LIMIT). Returns the decoded text and the byte count.
+ */
+async function readLimitedBody(request, maxBytes) {
   const declared = Number(request.headers.get("Content-Length") || 0);
-  if (declared > MAX_BODY_BYTES) throw new Error("BODY_TOO_LARGE");
+  if (declared > maxBytes) throw new Error("BODY_TOO_LARGE");
   if (!request.body) throw new Error("INVALID_BODY");
 
   const reader = request.body.getReader();
@@ -161,7 +174,7 @@ async function readLimitedBody(request) {
       if (done) break;
       total += value.byteLength;
 
-      if (total > MAX_BODY_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel();
         throw new Error("BODY_TOO_LARGE");
       }
@@ -179,7 +192,7 @@ async function readLimitedBody(request) {
     offset += chunk.length;
   }
 
-  return new TextDecoder().decode(bytes);
+  return { text: new TextDecoder().decode(bytes), bytes: total };
 }
 
 export default {
@@ -250,8 +263,11 @@ export default {
     }
 
     let body;
+    let rawBodyBytes = 0;
     try {
-      body = JSON.parse(await readLimitedBody(request));
+      const limited = await readLimitedBody(request, ATTACHMENT_BODY_LIMIT);
+      body = JSON.parse(limited.text);
+      rawBodyBytes = limited.bytes;
     } catch (error) {
       if (error.message === "BODY_TOO_LARGE") {
         return json({ error: "Request is too large." }, 413, origin);
@@ -263,6 +279,20 @@ export default {
       return json({ error: "Invalid JSON request." }, 400, origin);
     }
 
+    const hasAttachments = Array.isArray(body.attachments) && body.attachments.length > 0;
+
+    // The 64 KiB limit stays in force for text-only requests; attachment payloads get the wider,
+    // still strict, cap enforced while streaming above.
+    if (!hasAttachments && rawBodyBytes > TEXT_ONLY_BODY_LIMIT) {
+      return json({ error: "Request is too large." }, 413, origin);
+    }
+
+    const attachmentsResult = validateAttachments(body.attachments);
+    if (!attachmentsResult.ok) {
+      return json({ error: attachmentsResult.error }, attachmentsResult.status || 400, origin);
+    }
+    const attachments = attachmentsResult.attachments;
+
     if (body.model !== "free") {
       return json({ error: "This model tier is not available yet." }, 403, origin);
     }
@@ -272,18 +302,68 @@ export default {
       return json({ error: "Invalid conversation identifier." }, 400, origin);
     }
 
-    const conversation = buildConversationMessages(body?.messages);
+    // Direct API callers may send an attachment-only message with a blank final user turn;
+    // give it a sensible default question instead of dropping it. Never invent a turn otherwise.
+    let messageInput = body?.messages;
+    if (attachments.length > 0 && Array.isArray(messageInput)) {
+      const last = messageInput[messageInput.length - 1];
+      if (last && last.role === "user" && typeof last.content === "string" && !last.content.trim()) {
+        messageInput = [...messageInput.slice(0, -1), { ...last, content: DEFAULT_ATTACHMENT_PROMPT }];
+      }
+    }
+
+    const conversation = buildConversationMessages(messageInput);
     if (conversation.error) {
       return json({ error: conversation.error }, conversation.status || 400, origin);
     }
 
+    // Run one bounded vision-model query per attached image (never retried). Done after all
+    // validation and before the chat model so the FREE model receives real image content,
+    // not filenames. Analyses are kept for the language model and returned to the client so
+    // follow-up questions retain the extracted context.
+    const analyses = new Array(attachments.length).fill(null);
+    const userText = conversation.messages.at(-1)?.content ?? "";
+    for (let index = 0; index < attachments.length; index += 1) {
+      const attachment = attachments[index];
+      if (attachment.kind !== "image") continue;
+      try {
+        analyses[index] = await analyzeImage(env.AI, attachment, userText);
+      } catch (error) {
+        if (error?.code === "AI_QUOTA") {
+          return json({
+            error: "The free daily AI quota is exhausted. It resets at 00:00 UTC.",
+            quotaExhausted: true
+          }, 429, origin);
+        }
+        console.error("Workers AI vision request failed.");
+        return json({ error: "NYX AI couldn't analyse an attached image. Please try again later." }, 502, origin);
+      }
+    }
+    const imageAttachments = attachments.filter((attachment) => attachment.kind === "image");
+
     try {
+      // The FREE model keeps its existing id and request shape; the conversation history is
+      // forwarded as messages so the model can follow up on earlier turns. Attachment
+      // context (image analyses, document text) is appended to the newest user turn for
+      // this call only — validated history is never mutated.
+      let glmMessages = conversation.messages;
+      let systemPrompt = SYSTEM_PROMPT;
+      if (attachments.length > 0) {
+        const context = buildAttachmentContext(attachments, analyses);
+        const lastIndex = glmMessages.length - 1;
+        glmMessages = [
+          ...glmMessages.slice(0, lastIndex),
+          { ...glmMessages[lastIndex], content: glmMessages[lastIndex].content + context }
+        ];
+        systemPrompt += " The user attached files to the latest message; their extracted contents are appended to it. Answer using them, and say plainly when the attachments do not contain the requested information.";
+      }
+
       // The FREE model keeps its existing id and request shape; the conversation history is
       // forwarded as messages so the model can follow up on earlier turns.
       const result = await env.AI.run(FREE_MODEL, {
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...conversation.messages
+          { role: "system", content: systemPrompt },
+          ...glmMessages
         ],
         max_tokens: 700,
         chat_template_kwargs: { enable_thinking: false }
@@ -295,9 +375,23 @@ export default {
         return json({ error: "The AI returned an empty response." }, 502, origin);
       }
 
-      return json({ reply }, 200, origin);
-    } catch {
+      const payload = { reply };
+      if (imageAttachments.length > 0) {
+        payload.attachmentResults = attachments
+          .map((attachment, index) => attachment.kind === "image"
+            ? { name: attachment.name, analysis: analyses[index] }
+            : null)
+          .filter(Boolean);
+      }
+      return json(payload, 200, origin);
+    } catch (error) {
       // Provider errors may contain request data; do not log their contents.
+      if (isQuotaError(error)) {
+        return json({
+          error: "The free daily AI quota is exhausted. It resets at 00:00 UTC.",
+          quotaExhausted: true
+        }, 429, origin);
+      }
       console.error("Workers AI request failed.");
 
       return json({

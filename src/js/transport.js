@@ -2,12 +2,15 @@
  * NYX AI — Cloud Backend Transport.
  * Sends Firebase-authenticated requests to the Cloudflare Worker.
  */
-import { BACKEND, isBackendConfigured } from './config.js';
+import { BACKEND, LIMITS, isBackendConfigured } from './config.js';
 import { getFirebaseIdToken } from './auth.js';
 import { isModelAvailable } from './models.js';
 import { buildConversationHistory, isSendableHistory } from './history.js';
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
+
+/** Error message shown when the Worker reports the free daily Workers AI allocation is exhausted. */
+export const QUOTA_EXHAUSTED_MESSAGE = 'The free daily AI quota is exhausted. It resets at 00:00 UTC.';
 
 function getEndpoint() {
   if (!isBackendConfigured()) {
@@ -57,10 +60,17 @@ async function readResponse(response) {
   return new TextDecoder().decode(bytes);
 }
 
+/**
+ * Sends the conversation (plus any ready attachments) to the Worker and yields the reply text.
+ * The generator's return value carries `{ attachmentResults }` — the per-image analyses the
+ * Worker produced — so callers can persist them for follow-up context. Chat stubs in tests
+ * yield plain strings and return nothing, which is handled gracefully.
+ */
 export async function* createTransport({
   conversationId,
   messages,
   model,
+  attachments,
   signal
 }, { getToken = getFirebaseIdToken, fetchRequest = fetch } = {}) {
   if (signal?.aborted) {
@@ -79,17 +89,22 @@ export async function* createTransport({
   const token = await getToken();
   const endpoint = getEndpoint();
 
+  const payload = { conversationId, model, messages: safeMessages };
+  if (Array.isArray(attachments) && attachments.length) payload.attachments = attachments;
+
+  const bodyJson = JSON.stringify(payload);
+  if (new TextEncoder().encode(bodyJson).length > LIMITS.maxRequestBytes) {
+    // Never put an oversized request on the wire; the Worker would refuse it anyway.
+    throw new Error('The attachments are too large to send together. Remove one and try again.');
+  }
+
   const response = await fetchRequest(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`
     },
-    body: JSON.stringify({
-      conversationId,
-      model,
-      messages: safeMessages
-    }),
+    body: bodyJson,
     signal
   });
 
@@ -103,9 +118,12 @@ export async function* createTransport({
   }
 
   if (!response.ok) {
-    const message = response.status === 401 ? 'Your session has expired. Please sign in again.'
-      : response.status === 429 ? 'Too many requests. Please wait a moment and try again.'
-      : 'The AI service couldn’t respond. Please try again.';
+    const quota = data?.quotaExhausted === true || (response.status === 429 && typeof data?.error === 'string' && data.error.includes('quota'));
+    const message = quota
+      ? QUOTA_EXHAUSTED_MESSAGE
+      : response.status === 401 ? 'Your session has expired. Please sign in again.'
+        : response.status === 429 ? 'Too many requests. Please wait a moment and try again.'
+          : 'The AI service couldn’t respond. Please try again.';
     throw new Error(message);
   }
 
@@ -114,4 +132,5 @@ export async function* createTransport({
   }
 
   yield data.reply;
+  return { attachmentResults: Array.isArray(data.attachmentResults) ? data.attachmentResults : undefined };
 }
