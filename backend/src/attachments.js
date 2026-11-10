@@ -93,12 +93,16 @@ export function decodeDataUriImage(dataUri) {
   }
   if (binary.length === 0) return { ok: false, error: "An attached image is empty." };
   if (binary.length > MAX_IMAGE_BYTES) return { ok: false, error: "An attached image is too large." };
-  // PERF: this runs on Workers Free, where a request may use only 10 ms of CPU. Decoding the
-  // payload with `Uint8Array.from(binary, (c) => c.charCodeAt(0))` -- the obvious form -- invokes
-  // a JS callback once per byte: ~55 ms for a 1 MiB payload, which alone is 5x the whole CPU
-  // budget and makes every image request die with Cloudflare's "Worker exceeded resource limits"
-  // (a non-JSON body, which the app can only report as a generic failure). A plain indexed loop
-  // does the same work in ~1.4 ms. The bytes, and therefore the magic-byte check, are unchanged.
+  // PERF: the obvious form, `Uint8Array.from(binary, (c) => c.charCodeAt(0))`, invokes a JS
+  // callback once per byte. Measured locally (Node 22, same engine family as the Workers runtime)
+  // that is ~104 ms for a 1 MiB image and ~149 ms for a 1.4 MiB one -- the client's typical
+  // re-encode ceiling. A plain indexed loop does the identical work in ~3 ms / ~6 ms. The decoded
+  // bytes, and therefore the magic-byte check and every size limit, are unchanged.
+  //
+  // This is a measured local optimisation, not a proven explanation of the production failure:
+  // the Workers Free plan documents a 10 ms per-request CPU limit, so the old cost is far outside
+  // it and a plausible cause of the observed generic failure, but no CPU figure from the deployed
+  // Worker has been captured. See docs/TEST-REPORT.md for what remains unverified.
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);

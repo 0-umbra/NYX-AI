@@ -8,89 +8,89 @@ Android SDK/Gradle/Java and no device in this environment).
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Frontend unit + static checks | `npm test` | **190 / 190 passed**, 0 failed (~44 s) |
-| PDF detachment regressions | `node --test tests/unit/pdf-buffer.test.js` | **23 / 23 passed** |
+| Frontend unit + static checks | `npm test` | **200 / 200 passed**, 0 failed |
+| PDF detachment regressions | `node --test tests/unit/pdf-buffer.test.js` | **33 / 33 passed** |
 | Transport failure/notice regressions | `node --test tests/unit/transport-image-errors.test.js tests/unit/transport-notices.test.js` | **25 / 25 passed** |
 | Backend (Worker) tests | `cd backend && npm test` | **87 / 87 passed** |
 | Image-inference regressions | `cd backend && node --test test/image-inference.test.js` | **31 / 31 passed** |
 | Production build | `npm run build` | Built `www/`, incl. `www/vendor/pdf.worker.min.mjs` |
-| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled, 27.21 KiB / 8.01 KiB gzip; `env.AI`, `env.CHAT_LIMITER` |
+| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled; bindings `env.AI`, `env.CHAT_LIMITER` |
 | Android launcher icon | `node scripts/android-icons.mjs --check` | 22 files verified |
 | `git diff --check` | — | clean |
-| Android debug APK | `.github/workflows/android-debug.yml` | **Not run here** (no Android toolchain) |
-| Browser end-to-end | `npm run test:e2e` | **Not run here** (Playwright browser download blocked in this sandbox) |
+| Android debug APK / Playwright | CI on the PR | see the PR checks |
+| Android WebView device testing | — | **not performed here** |
 
-### PDF fix — root cause and evidence
+### PDF fix — confirmed root cause (two distinct parts)
 
 `pdfjs-dist` **5.7.284**; `legacy/build/pdf.mjs:21611`:
 `worker.messageHandler.sendWithPromise("GetDocRequest", docParams, data ? [data.buffer] : null)` —
-the buffer is a **transferable**, so `getDocument()` detaches the caller's ArrayBuffer. The old
-`processPdfDocument()` read the file once and passed the same buffer to the text pass, then to the
-OCR pass; the second `new Uint8Array(data)` threw *"Cannot perform Construct on a detached
-ArrayBuffer"*. Reproduced on the pre-fix code (caller buffer `604 → 0` bytes) and confirmed fixed
-(same call keeps `604` bytes and can be reused).
+the buffer is a **transferable**, so **every** `getDocument()` call detaches the buffer it is given.
 
-### Image investigation — what was found
+1. **First-load detachment — always.** Every PDF.js document load consumes its input buffer.
+2. **Conditional OCR reuse — the crash that was reported.** The old pipeline held a single buffer
+   for the whole document and reused it for the page-rendering pass. That pass runs only when
+   `likelyScanned` is true, i.e. when the extracted text layer has **fewer than 25 non-space
+   characters** — not simply "the PDF is scanned". A long text PDF therefore took one load and
+   worked; a scanned PDF, or any PDF whose text layer is nearly empty, took a second load on a
+   detached buffer and threw *"Cannot perform Construct on a detached ArrayBuffer"*.
 
-Not the same cause as the PDF bug. The observed message is the frontend's generic catch-all, which
-also discards every backend explanation. Two defects were found and fixed:
+This was verified against a reconstruction of the pre-fix pipeline:
 
-1. **Workers Free CPU limit.** `decodeDataUriImage` used `Uint8Array.from(binary, cb)`, a JS
-   callback per byte. Measured on a realistic client payload (1.37 MiB decoded): **114.1 ms**,
-   against a **10 ms** Workers Free per-request CPU budget — so every image request was killed by
-   the platform (non-JSON edge error, generic frontend message). The same bytes now decode in
-   **3.2 ms** with an indexed loop; the validation and returned bytes are unchanged.
-2. **Error mapping.** The Worker collapsed every vision failure into one opaque 502 and the
-   frontend replaced even that with "check your connection". Failures are now classified
-   (quota, plan gate, model unavailable/deprecated, payload too large, invalid image data,
-   timeout, out of capacity, malformed/empty provider response), logged once as a sanitized
-   structured record (stage, category, status, Workers AI numeric code only) and mapped to a
-   distinct, actionable, sanitized message that the conversation displays.
+| Fixture | Pre-fix result |
+| --- | --- |
+| Long text layer (≥ 25 chars) | **succeeded** — one load only |
+| Short text layer ("Short note") | **failed** — classified scanned, second load |
+| No text layer (scanned) | **failed** — second load |
 
-**Not verified:** live Workers AI / Moondream inference. There are no Cloudflare credentials or
-network access to the Worker in this environment, so no real image inference was performed. The
-tests use a mocked `env.AI` binding and assert request shape, response parsing, failure mapping and
-diagnostics — they cannot prove the deployed model answers. Likewise the plan-gate category is
-handled defensively; whether this account's plan actually rejects the vision model is unknown.
+So "every tested PDF failed" is consistent with all seven of those files being scanned or
+short-text; it is not evidence that long-text PDFs failed, and this report does not claim that.
+
+### Copy accounting (measured, not asserted)
+
+`createCopyReport()` records every whole-document byte copy the pipeline performs. The contract,
+asserted in `tests/unit/pdf-buffer.test.js`:
+
+| Document | Copies |
+| --- | --- |
+| Text PDF (one document load) | **1 snapshot + 1 transferable copy = 2** |
+| Scanned PDF (text load + OCR load) | **1 snapshot + 2 transferable copies = 3** |
+
+Copies are **per document load**, never per page: the same 2 copies were measured for a 1-page and
+a 40-page PDF. Independent confirmation, using `--expose-gc` heap accounting
+(`process.memoryUsage().arrayBuffers`) on an 8 MiB document rather than the pipeline's own
+instrumentation: constructing an arena holds **+8.00 MiB**, and one `load()` holds **+8.00 MiB**
+only while that copy is alive. Peak transient memory is therefore snapshot + one copy, even for a
+scanned PDF, because each copy is released (and detached by PDF.js) before the next is made.
+
+### Image investigation — what was found (and what is not proven)
+
+Not the same cause as the PDF bug. Two separate defects were found:
+
+1. **Measured local decode cost.** `decodeDataUriImage()` decoded base64 with
+   `Uint8Array.from(binary, (c) => c.charCodeAt(0))` — a JS callback per byte. Measured locally
+   (Node 22): **13.8 ms** for 100 KiB decoded, **104.2 ms** for 1 MiB, **148.9 ms** for 1.4 MiB
+   (the client's re-encode ceiling). The indexed loop does the same work in **0.4 / 2.9 / 5.6 ms**
+   and returns byte-identical output. `atob` itself is unchanged and negligible.
+2. **Error mapping.** The Worker collapsed every vision failure into one opaque 502, and the
+   frontend replaced even that with "check your connection". Failures are now classified, logged
+   once as a sanitized structured record (stage, category, status, Workers AI numeric code only)
+   and mapped to distinct, actionable, sanitized messages.
+
+**The Cloudflare CPU-limit explanation is a hypothesis, not a measurement.** The Workers Free plan
+documents a 10 ms per-request CPU limit, so a 104–149 ms decode is far outside the budget and is a
+plausible cause of the observed generic failure (a CPU kill returns a non-JSON edge error, and the
+old frontend showed its generic message for exactly that). But no CPU figure from the deployed
+Worker was captured here, and the observed failure could equally have come from the vision call
+itself or from another cause. The diagnostics added in this PR are what will distinguish them on
+the first real request (`wrangler tail` shows `nyx.vision.failed` with a category, or its absence
+shows the request never reached application code).
+
+**Not verified at all:** live Workers AI / Moondream inference. There are no Cloudflare credentials
+or network access to the Worker here, so no real image inference was performed. Tests use a mocked
+`env.AI` and prove request shape, response parsing, failure mapping and diagnostics — not that the
+deployed model answers.
 
 ---
-
-## Conversation context update (current branch)
-
-All results below come from commands executed on this branch. Nothing is estimated; the
-Cloudflare Worker was **not deployed** (dry run only) and the optional Playwright suite was **not** run.
-
-| Suite | Command | Result |
-| --- | --- | --- |
-| Frontend unit + static checks | `npm test` | **79 / 79 passed**, 0 failed (~21 s) |
-| Android launcher icon | `node scripts/android-icons.mjs` | **22 files generated and verified** (exit 0) |
-| Android launcher icon regressions | `node --test tests/unit/android-icons.test.js` | **11 / 11 passed** |
-| App boot / session-flow regressions | `node --test tests/unit/app-boot.test.js` | **6 / 6 passed** |
-| Conversation-context regressions | `node --test tests/unit/context.test.js` | **17 / 17 passed** |
-| Backend (Worker) tests | `cd backend && npm test` | **29 / 29 passed** (~0.4 s) |
-| Production build | `npm run build` | Built `www/` (index.html, manifest, bundled `app.bundle.js`, logo and icons) |
-| Worker compile | `cd backend && npx wrangler deploy --dry-run` | Compiled, 10.93 KiB upload / 3.74 KiB gzip; bindings `env.AI`, `env.CHAT_LIMITER` |
-| Android build | `.github/workflows/android-debug.yml` | Not run (no Android SDK / Gradle / Java in this environment) |
-| Browser end-to-end | `npm run test:e2e` | Not run (Playwright/Chromium are not installed here) |
-
-Conversation-context cases covered: related follow-up, pronoun follow-up ("he", "that character"),
-several follow-ups in one chat, a new chat starting empty, switching between two chats without mixing
-histories, reopening an older conversation, a long conversation using a bounded window, the newest
-message sent exactly once, local notices / blank messages / empty placeholders never sent, the open
-conversation restored after a reload, and the Worker forwarding + validating history (leading assistant
-dropped, blank turns ignored, client `system` messages rejected, 24-message cap, oversized history
-trimmed from the oldest turn, oversized body rejected).
-
-`tests/unit/app-boot.test.js` bundles the real `src/js/app.js` with Firebase stubbed and drives it in
-jsdom through boot, sign-in, a message, a follow-up, a reload, a new chat and sign-out. It asserts that
-no `error` / `unhandledRejection` is raised, that the generic "Something went wrong. Please try again."
-toast is never shown, and that a failure inside `send()` before the transport is reported as a
-conversation notice. The negative control was checked: removing the `try/catch` in `send()` makes that
-test fail.
-
-Not verified here: a live call to the deployed Worker and Workers AI with a real Firebase session
-(no credentials or network access in this environment). The FREE model id, authentication, origin
-checks, UID rate limiting and progressive reveal are unchanged.
 
 ---
 

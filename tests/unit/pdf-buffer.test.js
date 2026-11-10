@@ -1,11 +1,25 @@
 /**
  * Regression tests for the PDF.js ArrayBuffer-detachment bug.
  *
- * The bug: `getDocument()` hands the caller's ArrayBuffer to PDF.js's Worker as a *transferable*,
- * which permanently detaches it. The old pipeline extracted text with the only buffer it had and
- * then reused that same (now detached) buffer to render scanned pages, so every PDF failed with
- * "Cannot perform Construct on a detached ArrayBuffer" — after the text layer had already been
- * read successfully, which is why text PDFs failed too.
+ * The bug has two parts, and they are deliberately kept distinct here:
+ *
+ *  1. FIRST-LOAD DETACHMENT (always happens). `getDocument()` hands the caller's ArrayBuffer to
+ *     PDF.js's Worker as a *transferable*, which permanently detaches it. Every PDF.js document
+ *     load therefore consumes whatever buffer it is given.
+ *  2. CONDITIONAL OCR REUSE (the reported crash). The old pipeline had exactly one buffer for the
+ *     whole document. When the document was classified as scanned, that same — now detached —
+ *     buffer was reused for the page-rendering pass, which can only fail with
+ *     "Cannot perform Construct on a detached ArrayBuffer".
+ *
+ * Whether a second load happens at all depends on classification, and this is *not* simply
+ * "scanned vs text": `processPdfDocument()` calls `renderPdfPagesToImages()` only when
+ * `likelyScanned` is true, and `likelyScanned` means "fewer than 25 non-space characters were
+ * extracted". So a long text PDF takes one load and always worked; a scanned PDF, and any PDF
+ * whose text layer is short (a cover page, a one-word form, a signature scan), took the second
+ * load and failed. Verified against the pre-fix code: the long-text PDF succeeded, the other two
+ * threw the detached-buffer error.
+ *
+ * The fix is purely about who owns the bytes; no limit, validation step or upload policy changed.
  *
  * These tests are written to fail on that implementation and pass on the fix, in both directions:
  *  - a *simulated* PDF.js worker that really detaches its input (a real `structuredClone` transfer),
@@ -16,6 +30,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   withPdfBytes,
+  createCopyReport,
   extractPdfText,
   renderPdfPagesToImages,
   processPdfDocument,
@@ -154,24 +169,66 @@ const withCanvas = (run) => {
 
 // --- the arena itself --------------------------------------------------------
 
-test('withPdfBytes: hands out independent copies and never exposes the snapshot', () => {
+test('withPdfBytes: takes ONE snapshot copy and exposes its size', () => {
   const bytes = samplePdfBytes('hello');
-  const arena = withPdfBytes(bytes);
+  const report = createCopyReport();
+  const arena = withPdfBytes(bytes, { report });
   assert.equal(arena.length, bytes.byteLength);
+  assert.deepEqual(report.stages(), ['snapshot'], 'construction copies the document exactly once');
+  assert.equal(report.totalBytes, bytes.byteLength);
+  assert.equal(arena.snapshotDetached, false);
+});
 
-  const a = arena.fresh();
-  const b = arena.fresh();
-  assert.notEqual(a, b, 'each load gets its own copy');
-  assert.notEqual(a.buffer, b.buffer, 'each load gets its own ArrayBuffer');
-  assert.equal(a.byteLength, bytes.byteLength);
+test('withPdfBytes: each load gets one independent, exactly-sized transferable copy', async () => {
+  const bytes = samplePdfBytes('hello');
+  const report = createCopyReport();
+  const arena = withPdfBytes(bytes, { report });
 
-  // Detaching one copy (as PDF.js does) leaves the arena and every later copy intact.
-  structuredClone(a.buffer, { transfer: [a.buffer] });
-  assert.equal(a.byteLength, 0);
-  const c = arena.fresh();
-  assert.equal(c.byteLength, bytes.byteLength, 'bytes survive a detached transfer');
-  assert.deepEqual([...c], [...bytes], 'content is byte-identical');
-  assert.equal(arena.isDetached(), false, 'the snapshot itself was never handed out');
+  const received = [];
+  const load = async (copy) => { received.push(copy); return { numPages: 0 }; };
+  await arena.load(load);
+  await arena.load(load);
+
+  assert.equal(received.length, 2);
+  assert.notEqual(received[0], received[1], 'each load gets its own array');
+  assert.notEqual(received[0].buffer, received[1].buffer, 'each load gets its own ArrayBuffer');
+  for (const copy of received) {
+    assert.equal(copy.byteLength, bytes.byteLength);
+    assert.equal(copy.byteLength, copy.buffer.byteLength, 'exactly sized, so PDF.js makes no internal copy');
+    assert.deepEqual([...copy], [...bytes]);
+  }
+  assert.deepEqual(report.stages(), ['snapshot', 'transfer', 'transfer']);
+  assert.equal(report.count, 3, 'one snapshot + one copy per load');
+});
+
+test('withPdfBytes: a loader may detach its own copy while the snapshot stays intact', async () => {
+  const bytes = samplePdfBytes('detach me');
+  const arena = withPdfBytes(bytes);
+
+  // The loader does exactly what PDF.js does: transfers the buffer away.
+  const load = async (copy) => { structuredClone(copy.buffer, { transfer: [copy.buffer] }); return { numPages: 0 }; };
+  await arena.load(load);
+
+  assert.equal(arena.snapshotDetached, false, 'the pristine snapshot is never transferred');
+  assert.equal(arena.anyHandedOutDetached, true, 'the buffer handed to the loader was detached');
+  assert.deepEqual(arena.handedOut, [{ length: 0, detached: true }]);
+
+  // ...and the arena can still serve another load with full content.
+  let second;
+  await arena.load(async (copy) => { second = copy; return { numPages: 0 }; });
+  assert.equal(second.byteLength, bytes.byteLength);
+  assert.deepEqual([...second], [...bytes], 'later loads are unaffected by the earlier detachment');
+  assert.deepEqual(arena.handedOut, [
+    { length: 0, detached: true },
+    { length: bytes.byteLength, detached: false },
+  ]);
+});
+
+test('withPdfBytes: handedOut tracking is empty until a load happens', () => {
+  const arena = withPdfBytes(samplePdfBytes('x'));
+  assert.deepEqual(arena.handedOut, []);
+  assert.equal(arena.anyHandedOutDetached, false);
+  assert.equal(arena.snapshotDetached, false);
 });
 
 test('withPdfBytes: accepts ArrayBuffer, any TypedArray view and Buffer', () => {
@@ -181,22 +238,81 @@ test('withPdfBytes: accepts ArrayBuffer, any TypedArray view and Buffer', () => 
   const offsetView = new Uint8Array(view.buffer, 5, bytes.byteLength);
 
   for (const input of [toBuffer(bytes), bytes, offsetView, Buffer.from(bytes)]) {
-    const arena = withPdfBytes(input);
-    assert.deepEqual([...arena.fresh()], [...bytes], `input ${input.constructor.name}`);
+    const report = createCopyReport();
+    const arena = withPdfBytes(input, { report });
+    assert.equal(arena.length, bytes.byteLength, `input ${input.constructor.name}`);
+    assert.deepEqual([...arena.handedOut], []);
+    let copy;
+    arena.load((value) => { copy = value; return { numPages: 0 }; });
+    assert.deepEqual([...copy], [...bytes], `content for ${input.constructor.name}`);
+    // Only the document's own bytes are copied, never the surrounding pooled buffer.
+    assert.equal(report.totalBytes, bytes.byteLength * 2);
   }
 });
 
-test('withPdfBytes: copies exactly once per PDF (no extra copies for memory pressure)', () => {
-  // Two loads must be the only copies; the snapshot itself is one more. Anything beyond that
-  // would multiply a 10 MB PDF on a low-end Android device.
-  const bytes = samplePdfBytes('budget');
-  const arena = withPdfBytes(bytes);
-  const size = bytes.byteLength;
-  assert.equal(arena.length, size);
-  assert.equal(size, bytes.byteLength, 'the caller input is untouched by snapshotting');
+// --- the reported bug, reproduced and fixed ------------------------------------------------
+
+/**
+ * End-to-end copy accounting. `createCopyReport()` records every whole-document copy the pipeline
+ * makes; the numbers below are the contract:
+ *   text PDF    → 1 snapshot + 1 transferable copy            (one document load)
+ *   scanned PDF → 1 snapshot + 2 transferable copies          (text load + OCR load)
+ * Anything larger means a redundant copy crept back into the chain.
+ */
+test('copy accounting: a text PDF costs one snapshot plus one transfer copy', async () => {
+  const bytes = samplePdfBytes('A text layer long enough that this document is not treated as scanned');
+  const report = createCopyReport();
+  const result = await processPdfDocument(pdfFile(bytes), { report });
+
+  assert.equal(result.likelyScanned, false);
+  assert.deepEqual(report.stages(), ['snapshot', 'transfer']);
+  assert.equal(report.count, 2, `expected 2 whole-document copies, got ${report.count}`);
+  assert.equal(report.totalBytes, bytes.byteLength * 2);
 });
 
-// --- the reported bug, reproduced and fixed ------------------------------------------------
+test('copy accounting: a scanned PDF costs one snapshot plus two transfer copies', async () => {
+  const bytes = samplePdfBytes('');
+  await withCanvas(async () => {
+    const report = createCopyReport();
+    const result = await processPdfDocument(pdfFile(bytes), { report });
+    assert.equal(result.likelyScanned, true);
+    assert.deepEqual(report.stages(), ['snapshot', 'transfer', 'transfer'], 'one copy per document load');
+    assert.equal(report.count, 3, `expected 3 whole-document copies, got ${report.count}`);
+    assert.equal(report.totalBytes, bytes.byteLength * 3);
+  });
+});
+
+test('copy accounting: the snapshot is taken once even when both passes run', async () => {
+  const bytes = samplePdfBytes('');
+  await withCanvas(async () => {
+    const report = createCopyReport();
+    const arena = withPdfBytes(bytes, { report });
+    // Both public functions reuse the same arena: the document is never re-snapshotted.
+    await extractPdfText(null, { bytes: arena, report });
+    await renderPdfPagesToImages(null, { bytes: arena, report });
+    assert.deepEqual(report.stages(), ['snapshot', 'transfer', 'transfer']);
+    assert.equal(report.count, 3);
+  });
+});
+
+test('copy accounting: standalone calls each snapshot once (they own their input)', async () => {
+  const bytes = samplePdfBytes('standalone calls still snapshot once each');
+  const report = createCopyReport();
+  await extractPdfText(bytes, { report });          // snapshot + 1 transfer
+  await extractPdfText(bytes, { report });          // snapshot + 1 transfer
+  assert.deepEqual(report.stages(), ['snapshot', 'transfer', 'snapshot', 'transfer']);
+  assert.equal(report.count, 4);
+});
+
+test('copy accounting: no copy grows with page count', async () => {
+  const onePage = createCopyReport();
+  await processPdfDocument(pdfFile(samplePdfBytes('single page with a long enough text layer here')), { report: onePage });
+  const manyPages = createCopyReport();
+  await processPdfDocument(pdfFile(multiPagePdfBytes(40, (page) => `page ${page} has a readable text layer`)), { report: manyPages });
+  assert.equal(onePage.count, 2);
+  assert.equal(manyPages.count, 2, 'copies are per document load, never per page');
+  assert.deepEqual(manyPages.stages(), ['snapshot', 'transfer']);
+});
 
 test('ordinary text-based PDF: text is extracted and the caller bytes stay usable', async () => {
   const bytes = samplePdfBytes('Quarterly revenue grew 12 percent across all regions');
@@ -445,7 +561,7 @@ test('real PDF.js: the caller buffer is never detached (shipped code path)', asy
   assert.match(new TextDecoder().decode(caller), /^%PDF-1\.4/);
 });
 
-test('real PDF.js: processPdfDocument leaves the file readable and a scanned PDF reaches OCR', async () => {
+test('real PDF.js: a text PDF loads once, and a scanned PDF still reaches the OCR pass', async () => {
   const textPdf = pdfFile(samplePdfBytes('A genuine text layer with comfortably enough characters'));
   const processed = await processPdfDocument(textPdf);
   assert.equal(processed.likelyScanned, false);
@@ -460,4 +576,51 @@ test('real PDF.js: processPdfDocument leaves the file readable and a scanned PDF
     assert.ok(result.ocrImages.length >= 1);
     assert.match(result.ocrImages[0].data, /^data:image\/jpeg;base64,/);
   });
+});
+
+// --- the classification boundary that decided which PDFs failed ------------------------------
+
+test('a short-text PDF is classified as scanned and therefore takes a second load', async () => {
+  // This is the exact shape of the reported failure: the first load succeeds (text is read), the
+  // document is then classified as scanned because the text layer is nearly empty, and the OCR
+  // pass runs a second PDF.js load — which the old single-buffer pipeline could not survive.
+  const bytes = samplePdfBytes('Short note');
+  await withCanvas(async () => {
+    const { load, received } = detachingLoader({ pages: ['Short note'] });
+    const report = createCopyReport();
+    const result = await processPdfDocument(pdfFile(bytes), { loadDocument: load, report });
+
+    assert.equal(result.likelyScanned, true, 'fewer than 25 non-space characters means scanned');
+    assert.equal(received.length, 2, 'text pass + OCR pass');
+    for (const copy of received) assert.equal(copy.byteLength, 0, 'each load detached its own copy');
+    assert.deepEqual(report.stages(), ['snapshot', 'transfer', 'transfer']);
+  });
+});
+
+test('a long-text PDF takes exactly one load and never reaches the OCR pass', async () => {
+  const bytes = samplePdfBytes('This document has a long text layer, comfortably over twenty five characters');
+  await withCanvas(async () => {
+    const { load, received } = detachingLoader({ pages: ['This document has a long text layer, comfortably over twenty five characters'] });
+    const result = await processPdfDocument(pdfFile(bytes), { loadDocument: load });
+    assert.equal(result.likelyScanned, false);
+    assert.equal(received.length, 1, 'no OCR load for a text PDF — the conditional reuse is not reached');
+    assert.equal(result.ocrImages, undefined, 'no OCR images are produced');
+  });
+});
+
+test('the caller file can be re-read after processing, whatever the classification', async () => {
+  // processPdfDocument never hands the caller's own buffer to PDF.js, so the File stays readable —
+  // which is what makes retry-after-failure and sequential attachments safe.
+  for (const text of ['A long text layer with plenty of readable characters in it', '']) {
+    const bytes = samplePdfBytes(text);
+    let reads = 0;
+    const file = {
+      name: 'x.pdf', type: 'application/pdf', size: bytes.byteLength,
+      arrayBuffer: async () => { reads += 1; return toBuffer(bytes); },
+    };
+    await withCanvas(() => processPdfDocument(file));
+    assert.equal(reads, 1, 'the file is read once per processing run');
+    assert.equal(bytes.byteLength, samplePdfBytes(text).byteLength, 'the source bytes are untouched');
+    assert.match(new TextDecoder().decode(bytes), /^%PDF-1\.4/);
+  }
 });

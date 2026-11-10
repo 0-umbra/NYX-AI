@@ -467,10 +467,12 @@ test("diagnostics: logVisionFailure tolerates a logger that throws and ignores n
 
 // --- the CPU hot path -------------------------------------------------------
 
-test("base64 decode stays inside the Workers Free CPU budget and validates identically", () => {
-  // A 1 MiB image is the realistic decoded size the client re-encodes to. The previous decoder
-  // (`Uint8Array.from(binary, cb)`) took tens of milliseconds for that — more than the whole
-  // 10 ms Workers Free CPU allowance — which killed real image requests at the edge.
+test("base64 decode is fast enough to be plausible on a CPU-limited runtime and validates identically", () => {
+  // Scope of this test: LOCAL decoding throughput only. A 1 MiB image is the realistic decoded
+  // size the client re-encodes to; the previous decoder (`Uint8Array.from(binary, cb)`) measured
+  // ~104 ms locally for that, versus ~3 ms for the indexed loop. The Workers Free plan documents a
+  // 10 ms per-request CPU limit, which is why the old cost is a plausible cause of the production
+  // failure — but this test measures Node, not the Cloudflare runtime, and does not prove it.
   const bigBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(1024 * 1024, 5)]);
   const uri = dataUri("image/jpeg", bigBytes);
   assert.equal(uri.length, Math.ceil(bigBytes.length / 3) * 4 + "data:image/jpeg;base64,".length);
@@ -484,8 +486,8 @@ test("base64 decode stays inside the Workers Free CPU budget and validates ident
     assert.equal(decoded.bytes.length, bigBytes.length);
   }
   const perCall = (performance.now() - started) / runs;
-  // Generous bound: the loop version is ~1-2 ms per MiB on Node; the callback version is >50 ms.
-  // The bound is deliberately far from both so it is a real regression guard, not a flake.
+  // Generous bound: measured ~3 ms per MiB locally; the callback version is ~100 ms. The bound
+  // sits far from both so it is a real regression guard rather than a flake on a slow CI box.
   assert.ok(perCall < 20, `1 MiB base64 decode took ${perCall.toFixed(1)} ms; the CPU-limited path regressed`);
 });
 

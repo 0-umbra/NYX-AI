@@ -90,44 +90,66 @@ export function cleanExtractedText(raw, { maxChars = LIMITS.maxDocumentChars } =
 }
 
 /**
+ * Counts byte copies in the PDF pipeline, for tests and for memory accounting.
+ *
+ * A "copy" here is exactly what costs memory: a fresh ArrayBuffer of the document's size being
+ * allocated and filled. Instrumentation is opt-in (a no-op otherwise), so production takes no
+ * extra branch worth worrying about and tests can prove the real count instead of assuming it.
+ */
+export function createCopyReport() {
+  const events = [];
+  return {
+    events,
+    /** Records one whole-document byte copy. */
+    add(stage, bytes) {
+      events.push({ stage, bytes });
+    },
+    get count() { return events.length; },
+    get totalBytes() { return events.reduce((sum, event) => sum + event.bytes, 0); },
+    stages() { return events.map((event) => event.stage); },
+  };
+}
+
+/**
  * Lazy PDF.js loader; the Worker (vendor/pdf.worker.min.mjs) is copied by scripts/build.js.
  *
  * LIFETIME RULE — read before changing this function. PDF.js takes ownership of `data`:
  * `getDocument()` hands the underlying ArrayBuffer to its Worker as a *transferable*
  * (`sendWithPromise("GetDocRequest", params, [data.buffer])`, pdf.mjs), which permanently
- * detaches the caller's buffer. Any later use of the same ArrayBuffer throws
+ * detaches it. Any later use of that ArrayBuffer throws
  * "Cannot perform Construct on a detached ArrayBuffer".
  *
- * So: the caller must always pass bytes that PDF.js may consume. `withPdfBytes()` below does
- * exactly that, but the rule is enforced here as well — the bytes are copied into a fresh,
- * exactly-sized Uint8Array at this single boundary. That copy is cheap next to the copy PDF.js
- * already makes when an input is a view into a larger buffer, and it guarantees that no
- * document load can ever detach a buffer the caller still needs.
+ * Therefore this function performs NO copy: it passes the bytes straight through, and the single
+ * owner of the "give PDF.js its own buffer" rule is `PdfBytes.load()` below. Duplicating the copy
+ * here as well would double every document's peak memory for no benefit.
+ *
+ * PDF.js additionally copies internally when the input is a *view* into a larger buffer
+ * (`getDataProp`: `val instanceof Uint8Array && val.byteLength === val.buffer.byteLength` is
+ * returned as-is, anything else becomes `new Uint8Array(val)`). Because `load()` hands it an
+ * exactly-sized array, that internal copy does not happen.
  */
 async function defaultLoadDocument(data) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.min.mjs');
   // The vendored worker only exists in the built app; in Node tests pdf.js uses a fake worker.
   if (typeof document !== 'undefined') pdfjs.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.mjs';
-  const transferable = new Uint8Array(data.byteLength);
-  transferable.set(data);
-  return pdfjs.getDocument({ data: transferable, isEvalSupported: false, disableFontFace: true }).promise;
+  return pdfjs.getDocument({ data, isEvalSupported: false, disableFontFace: true }).promise;
 }
 
 /**
- * Normalises the bytes we keep for a PDF into one private, exactly-sized snapshot.
+ * The pristine byte snapshot for one PDF, plus the one place a transferable copy is made.
  *
- * Returns an "arena" object rather than a bare buffer so ownership is explicit:
- *  - `length` never changes, even after PDF.js detaches the buffers it was given;
- *  - `fresh()` returns a NEW independent copy for one document-loading operation;
- *  - `isDetached()` reports whether the buffer was in fact handed to PDF.js (used by tests).
+ *  - Constructing an arena takes ONE copy of the input into an exactly-sized snapshot. The input
+ *    may be an ArrayBuffer, any TypedArray view (Android can hand over views into a pooled
+ *    buffer) or a Node Buffer; only the bytes in view are copied.
+ *  - `load()` hands a loader a brand-new independent copy, so the loader may transfer and detach
+ *    it without touching the snapshot. That is the ONLY copy per document-loading operation.
+ *  - `handedOut` tracks those buffers, so the arena can report truthfully whether a loader
+ *    consumed (detached) one of them. The snapshot itself is never transferred, so it is
+ *    reported separately — checking the snapshot would always be false and mean nothing.
  *
- * Deliberately copies once and only once per PDF. Text extraction and scanned-page rendering
- * each receive their own copy from `fresh()`, which is the minimum needed to keep the snapshot
- * intact; nothing is retained after processing. On low-end Android that is two extra copies of
- * one document (≤ the 10 MB attachment cap → ≤ 20 MB transient), which is why no further
- * copies are made anywhere in the pipeline.
+ * Copies are recorded in `report` when one is supplied, so tests can assert the real count.
  */
-export function withPdfBytes(data) {
+export function withPdfBytes(data, { report = null } = {}) {
   const source = data instanceof Uint8Array
     ? data
     : ArrayBuffer.isView(data)
@@ -135,36 +157,45 @@ export function withPdfBytes(data) {
       : new Uint8Array(data);
   const snapshot = new Uint8Array(source.byteLength);
   snapshot.set(source);
+  report?.add('snapshot', snapshot.byteLength);
+
+  const handedOut = [];
 
   return {
+    /** Size of the document in bytes. Constant: the snapshot is never transferred. */
     get length() { return snapshot.byteLength; },
-    /** A brand-new copy PDF.js may transfer and detach. Never null, even if a copy was detached. */
-    fresh() {
+    /** Every buffer given to a loader: its size now, and whether that loader detached it. */
+    get handedOut() { return handedOut.map((entry) => ({ length: entry.bytes.byteLength, detached: entry.bytes.byteLength === 0 })); },
+    /** True only if the pristine snapshot were ever detached — which must never happen. */
+    get snapshotDetached() { return snapshot.byteLength === 0; },
+    /** True when at least one buffer handed to a loader was actually detached by it. */
+    get anyHandedOutDetached() { return handedOut.some((entry) => entry.bytes.byteLength === 0); },
+    /** An independent copy for one document-loading operation. This is the only copy per load. */
+    load(loadDocument) {
       const copy = new Uint8Array(snapshot.byteLength);
       copy.set(snapshot);
-      return copy;
+      report?.add('transfer', copy.byteLength);
+      handedOut.push({ bytes: copy });
+      return loadDocument(copy);
     },
-    /** True when at least one buffer previously handed out has been detached. */
-    isDetached() { return snapshot.byteLength === 0; },
   };
-}
-
-/** Wraps a caller-supplied `loadDocument` so it can never receive (and detach) our snapshot. */
-function isolateLoader(loadDocument) {
-  return (bytes) => loadDocument(bytes.slice());
 }
 
 /**
  * Extracts text from a PDF. Stops as soon as the character budget is reached so a 500-page
  * scan is never fully read. Returns per-document text plus scanned-PDF detection.
  *
- * `data` is never handed to PDF.js directly: it is snapshotted and each load gets its own copy,
- * so the caller can keep using its bytes afterwards (and the scanned-PDF OCR pass can still run).
+ * `data` is never handed to PDF.js directly: the bytes are snapshotted and the single document
+ * load gets its own transferable copy, so the caller can keep using its bytes afterwards (and the
+ * scanned-PDF OCR pass can still run). Pass `bytes` (an arena from withPdfBytes) to share one
+ * snapshot across several loads instead of re-snapshotting the document each time.
  */
-export async function extractPdfText(data, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxPdfPages, loadDocument = defaultLoadDocument } = {}) {
-  const bytes = withPdfBytes(data);
-  const load = isolateLoader(loadDocument);
-  const doc = await load(bytes.fresh());
+export async function extractPdfText(data, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxPdfPages, loadDocument = defaultLoadDocument, bytes: arena = null, report = null } = {}) {
+  // An arena may be supplied by processPdfDocument() so the snapshot is taken once per PDF; when
+  // called standalone the bytes are snapshotted here instead (so raw ArrayBuffers, views and
+  // pooled Buffers are all safe).
+  const bytes = arena ?? withPdfBytes(data, { report });
+  const doc = await bytes.load(loadDocument);
   try {
 
     const pageCount = doc.numPages;
@@ -216,16 +247,26 @@ export async function extractDocumentText(fileLike, options = {}) {
  * Full PDF path: extracts the text layer, and when the PDF turns out to be scanned
  * (no usable text), renders the first LIMITS.maxOcrPages pages for vision-model OCR.
  *
- * The file is read ONCE into an arena snapshot that PDF.js can never detach; the text pass and
- * the OCR pass each consume their own copy. Before this, the text pass handed the single buffer
- * to PDF.js, PDF.js detached it, and the OCR pass then threw
- * "Cannot perform Construct on a detached ArrayBuffer" for every PDF (text or scanned).
+ * The file is read ONCE into a snapshot that PDF.js can never detach, and that snapshot is
+ * reused by both passes. Copy accounting per PDF (see `report`):
+ *   - text PDF (one load):       1 snapshot + 1 transferable copy = 2 whole-document copies;
+ *   - scanned PDF (text + OCR):  1 snapshot + 2 transferable copies = 3.
+ *
+ * Before this, there was a single buffer for the whole pipeline: the text pass handed it to
+ * PDF.js, PDF.js transferred it to its worker and detached it, and the OCR pass — reached only
+ * when `likelyScanned` is true — then threw "Cannot perform Construct on a detached
+ * ArrayBuffer". A PDF with a long text layer therefore never hit the second load and worked; a
+ * scanned PDF, or any PDF whose text layer yields fewer than 25 non-space characters (which the
+ * pipeline classifies as scanned), failed.
  */
-export async function processPdfDocument(fileLike, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxOcrPages, loadDocument } = {}) {
-  const bytes = withPdfBytes(await fileLike.arrayBuffer());
-  const result = await extractPdfText(bytes.fresh(), { maxChars, loadDocument });
+export async function processPdfDocument(fileLike, { maxChars = LIMITS.maxDocumentChars, maxPages = LIMITS.maxOcrPages, loadDocument, report = null } = {}) {
+  // ONE snapshot for the whole document, reused by both passes. One transferable copy per
+  // document-loading operation, and no copies at all when the document is text-only (a single
+  // load). Peak transient memory is therefore snapshot + 1 copy, never snapshot + N.
+  const bytes = withPdfBytes(await fileLike.arrayBuffer(), { report });
+  const result = await extractPdfText(null, { maxChars, loadDocument, bytes, report });
   if (!result.likelyScanned) return result;
-  const ocr = await renderPdfPagesToImages(bytes.fresh(), { maxPages, loadDocument });
+  const ocr = await renderPdfPagesToImages(null, { maxPages, loadDocument, bytes, report });
   return {
     ...result,
     text: '',
@@ -238,12 +279,12 @@ export async function processPdfDocument(fileLike, { maxChars = LIMITS.maxDocume
 /**
  * Renders the first pages of a scanned PDF to JPEG data URIs for OCR through the vision model.
  * Browser-only: returns { images: [], unavailable: true } where canvas is missing (unit tests).
- * Every load uses its own copy of the bytes, because PDF.js detaches what it is given.
+ * Each load gets its own transferable copy, because PDF.js detaches whatever it is given.
  */
-export async function renderPdfPagesToImages(data, { maxPages = LIMITS.maxOcrPages, targetWidth = LIMITS.maxImageEdge, loadDocument = defaultLoadDocument } = {}) {
+export async function renderPdfPagesToImages(data, { maxPages = LIMITS.maxOcrPages, targetWidth = LIMITS.maxImageEdge, loadDocument = defaultLoadDocument, bytes: arena = null, report = null } = {}) {
   if (typeof document === 'undefined') return { images: [], unavailable: true };
-  const bytes = withPdfBytes(data);
-  const doc = await isolateLoader(loadDocument)(bytes.fresh());
+  const bytes = arena ?? withPdfBytes(data, { report });
+  const doc = await bytes.load(loadDocument);
   try {
     const images = [];
     const pages = Math.min(doc.numPages, maxPages);
