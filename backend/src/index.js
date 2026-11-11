@@ -4,6 +4,8 @@ import {
   analyzeImage,
   buildAttachmentContext,
   isQuotaError,
+  logVisionFailure,
+  visionFailureResponse,
   ATTACHMENT_BODY_LIMIT,
   TEXT_ONLY_BODY_LIMIT,
   DEFAULT_ATTACHMENT_PROMPT
@@ -289,6 +291,18 @@ export default {
 
     const attachmentsResult = validateAttachments(body.attachments);
     if (!attachmentsResult.ok) {
+      // A rejected attachment never reaches the vision call, so without this the stage that
+      // fails *before* inference (base64 decoding, magic bytes, size caps) would leave no trace
+      // at all -- and "decode rejected the image" would look identical to "the model failed".
+      // Only fixed categories and integer codes are logged; never the payload or the file name.
+      const isImage = Array.isArray(body.attachments) &&
+        body.attachments.some((attachment) => attachment?.kind === "image");
+      logVisionFailure({
+        stage: isImage ? "validation.image" : "validation.document",
+        category: attachmentsResult.category || "AI_INVALID_REQUEST",
+        status: attachmentsResult.status || 400,
+        providerCode: null
+      });
       return json({ error: attachmentsResult.error }, attachmentsResult.status || 400, origin);
     }
     const attachments = attachmentsResult.attachments;
@@ -326,17 +340,27 @@ export default {
     for (let index = 0; index < attachments.length; index += 1) {
       const attachment = attachments[index];
       if (attachment.kind !== "image") continue;
+      const visionStartedAt = Date.now();
       try {
         analyses[index] = await analyzeImage(env.AI, attachment, userText);
       } catch (error) {
-        if (error?.code === "AI_QUOTA") {
-          return json({
-            error: "The free daily AI quota is exhausted. It resets at 00:00 UTC.",
-            quotaExhausted: true
-          }, 429, origin);
-        }
-        console.error("Workers AI vision request failed.");
-        return json({ error: "NYX AI couldn't analyse an attached image. Please try again later." }, 502, origin);
+        const elapsedMs = Date.now() - visionStartedAt;
+        const status = Number.isInteger(error?.status) ? error.status : null;
+        const providerCode = Number.isInteger(error?.providerCode) ? error.providerCode : null;
+        // One sanitized diagnostic per failed vision call: stage, category, status and the
+        // Workers AI numeric code only. No image, prompt, file name or provider message.
+        logVisionFailure({
+          stage: attachment.ocr ? "vision.ocr_page" : "vision.image",
+          category: error?.code ?? "AI_FAILED",
+          status,
+          providerCode,
+          elapsedMs
+        });
+
+        // Distinct, actionable causes get distinct user-facing messages; the body is built from
+        // fixed strings only, so no provider text can ever be forwarded.
+        const { status: failureStatus, body: failureBody } = visionFailureResponse(error?.code ?? "AI_FAILED");
+        return json(failureBody, failureStatus, origin);
       }
     }
     const imageAttachments = attachments.filter((attachment) => attachment.kind === "image");

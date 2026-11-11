@@ -1,5 +1,29 @@
 name: Deploy NYX AI Worker
 
+# DEPLOYMENT SAFETY NOTE
+# ----------------------
+# This workflow used to deploy as soon as a push landed on `develop`, running no tests in the
+# deploy job itself (CI ran separately, in parallel, and could not block it). A backend change
+# that broke the Worker could therefore reach production before CI had said a word about it.
+#
+# The two gates below close that hole without redesigning anything:
+#   1. `verify` reuses the existing `cloudflare-check.yml` workflow, unmodified, via
+#      `workflow_call`. That workflow already runs the frontend tests, the frontend build, the
+#      backend tests and a `wrangler deploy --dry-run`. Nothing in it is weakened or duplicated.
+#   2. `deploy` declares `needs: verify`, so it cannot start — let alone run `wrangler deploy` —
+#      unless `verify` succeeded.
+#
+# Both jobs check out `github.sha`, so the two run against exactly the same commit:
+#   - `verify` inherits the caller's `github` context, so `github.sha` there is the commit that
+#     triggered this deploy run;
+#   - `deploy` is in this same workflow, so its `github.sha` is the same value.
+# That is what makes "we verified exactly what we shipped" a guarantee rather than an intention.
+#
+# On first merge: `uses: ./.github/workflows/cloudflare-check.yml` resolves the called workflow
+# from the SAME commit as this caller (GitHub's documented behaviour for local `./` and `$/`
+# references) -- it is not read from the default branch. So the gate is active on this deploy
+# itself; no bootstrap step or default-branch workaround is needed.
+
 on:
   push:
     branches:
@@ -12,14 +36,19 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    # Reuses the existing check workflow as-is. No steps are copied, so the two cannot drift.
+    uses: ./.github/workflows/cloudflare-check.yml
+
   deploy:
+    needs: verify
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout develop
+      - name: Checkout the verified commit
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

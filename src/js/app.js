@@ -6,6 +6,7 @@ import { createPrefs, applyPrefs, initSettings } from './settings.js';
 import { initModels } from './models.js';
 import { initChat } from './chat.js';
 import { createTransport } from './transport.js';
+import { createAttachmentDiagnostics } from './attachments.js';
 import { initAuth } from './auth.js';
 import { initSidebar } from './sidebar.js';
 import { $, toast, closeTopDialog } from './ui.js';
@@ -56,8 +57,11 @@ function boot() {
   let sidebar;
   const router = createRouter({ onChange: (name) => { if (name === 'chat') chat?.scrollToBottom(); else sidebar?.close({ restoreFocus: false }); } });
   const models = initModels({ storage, onCompare: () => router.go('models') });
-  chat = initChat({ store, storage, getModelId: () => models.id });
-  chat.setTransport(createTransport);
+  // One structured, sanitized diagnostic sink for the attachment and transport stages. It records
+  // stage/category/size/status only — never tokens, image bytes, base64 data or document text.
+  const diagnostics = createAttachmentDiagnostics();
+  chat = initChat({ store, storage, getModelId: () => models.id, diagnostics });
+  chat.setTransport((request) => createTransport(request, { diagnostics }));
   sidebar = initSidebar({ store, chat, router, storage });
   initSettings({ prefs, store, storage });
   router.start();
