@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import { Buffer } from "node:buffer";
-import worker from "../src/index.js";
+import worker, { logChatTiming } from "../src/index.js";
 import { buildConversationMessages, MAX_MESSAGES, MAX_TOTAL_CHARS } from "../src/conversation.js";
 
 const ORIGIN = "https://localhost";
@@ -569,4 +569,215 @@ test("conversation helper validates roles and content without the network", () =
   assert.ok(bounded.messages.reduce((n, m) => n + m.content.length, 0) <= MAX_TOTAL_CHARS);
   assert.equal(bounded.messages.at(-1).role, "user");
   assert.equal(bounded.messages[0].role, "user");
+});
+
+// --- GLM timing diagnostics (25 s delay investigation) ----------------------
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function captureInfoLogs() {
+  const lines = [];
+  const originalInfo = console.info;
+  const originalError = console.error;
+  console.info = (...args) => { lines.push(args.map(String).join(" ")); };
+  console.error = (...args) => { lines.push(args.map(String).join(" ")); };
+  return {
+    lines,
+    restore() {
+      console.info = originalInfo;
+      console.error = originalError;
+    },
+    timingRecords() {
+      return lines
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .filter((record) => record && record.event === "nyx.chat.timing");
+    }
+  };
+}
+
+test("timing: distinguishes slow GLM inference time from Worker overhead on text chat", async () => {
+  const capture = captureInfoLogs();
+  try {
+    const response = await worker.fetch(
+      makeRequest("/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "free",
+          messages: [{ role: "user", content: "PRIVATE-PROMPT-MARKER" }]
+        })
+      }),
+      makeEnv({
+        AI: {
+          run: async () => {
+            await sleep(45);
+            return { choices: [{ message: { role: "assistant", content: "PRIVATE-REPLY-MARKER" } }] };
+          }
+        }
+      })
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { reply: "PRIVATE-REPLY-MARKER" });
+  } finally {
+    capture.restore();
+  }
+
+  const records = capture.timingRecords();
+  assert.equal(records.length, 1);
+  const record = records[0];
+  assert.deepEqual(
+    Object.keys(record).sort(),
+    ["event", "glmMs", "hasAttachments", "status", "totalMs", "visionMs", "workerMs"]
+  );
+  assert.equal(record.status, 200);
+  assert.equal(record.hasAttachments, false);
+  assert.equal(record.visionMs, 0);
+  assert.ok(record.glmMs >= 35, `expected glmMs >= 35, got ${record.glmMs}`);
+  assert.ok(record.totalMs >= record.glmMs, "totalMs must include glmMs");
+  assert.ok(record.workerMs < record.glmMs, `expected workerMs (${record.workerMs}) < glmMs (${record.glmMs})`);
+  assert.equal(record.workerMs, record.totalMs - record.glmMs - record.visionMs);
+
+  const logged = capture.lines.join("\n");
+  assert.ok(!logged.includes("PRIVATE-PROMPT-MARKER"));
+  assert.ok(!logged.includes("PRIVATE-REPLY-MARKER"));
+  assert.ok(!logged.includes("test-user-123"));
+});
+
+test("timing: distinguishes slow non-inference Worker work from fast GLM inference", async () => {
+  const capture = captureInfoLogs();
+  try {
+    const response = await worker.fetch(
+      makeRequest("/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "free",
+          messages: [{ role: "user", content: "Hello" }]
+        })
+      }),
+      makeEnv({
+        CHAT_LIMITER: {
+          limit: async () => {
+            await sleep(45);
+            return { success: true };
+          }
+        },
+        AI: {
+          run: async () => ({ choices: [{ message: { role: "assistant", content: "fast reply" } }] })
+        }
+      })
+    );
+    assert.equal(response.status, 200);
+  } finally {
+    capture.restore();
+  }
+
+  const [record] = capture.timingRecords();
+  assert.ok(record);
+  assert.ok(record.workerMs >= 35, `expected workerMs >= 35, got ${record.workerMs}`);
+  assert.ok(record.glmMs < record.workerMs, `expected glmMs (${record.glmMs}) < workerMs (${record.workerMs})`);
+  assert.equal(record.totalMs, record.glmMs + record.visionMs + record.workerMs);
+});
+
+test("timing: records GLM timing on empty (502), quota (429) and failed (503) GLM calls, never on pre-GLM rejections", async () => {
+  const capture = captureInfoLogs();
+  try {
+    // Pre-GLM rejection (401) must not emit nyx.chat.timing.
+    const unauth = await worker.fetch(
+      makeRequest("/chat", {
+        method: "POST",
+        auth: false,
+        body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] })
+      }),
+      makeEnv()
+    );
+    assert.equal(unauth.status, 401);
+
+    // Empty GLM response -> 502
+    const empty = await worker.fetch(
+      makeRequest("/chat", {
+        method: "POST",
+        body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] })
+      }),
+      makeEnv({ AI: { run: async () => ({ choices: [{ message: { content: "" } }] }) } })
+    );
+    assert.equal(empty.status, 502);
+
+    // Quota GLM error -> 429
+    const quota = await worker.fetch(
+      makeRequest("/chat", {
+        method: "POST",
+        body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] })
+      }),
+      makeEnv({ AI: { run: async () => { throw new Error("daily neurons allocation exhausted"); } } })
+    );
+    assert.equal(quota.status, 429);
+
+    // Generic GLM error -> 503
+    const failed = await worker.fetch(
+      makeRequest("/chat", {
+        method: "POST",
+        body: JSON.stringify({ model: "free", messages: [{ role: "user", content: "Hello" }] })
+      }),
+      makeEnv({ AI: { run: async () => { throw new Error("SENSITIVE-GLM-UPSTREAM-DETAIL"); } } })
+    );
+    assert.equal(failed.status, 503);
+  } finally {
+    capture.restore();
+  }
+
+  const records = capture.timingRecords();
+  assert.deepEqual(records.map((r) => r.status), [502, 429, 503]);
+  assert.ok(!capture.lines.join("\n").includes("SENSITIVE-GLM-UPSTREAM-DETAIL"));
+});
+
+test("timing: logChatTiming enforces strict numeric/boolean schema and tolerates logger failures", () => {
+  const lines = [];
+  const logger = { info: (line) => lines.push(line) };
+  const fakeJwt = ["hdr", "pld", "sig"].join(".");
+
+  logChatTiming({
+    status: 200,
+    hasAttachments: true,
+    glmMs: 1200.4,
+    visionMs: 310.2,
+    totalMs: 1550.6,
+    prompt: "secret user prompt",
+    image: "data:image/png;base64,AAAA",
+    filename: "passport.png",
+    token: fakeJwt
+  }, { logger });
+
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]);
+  assert.deepEqual(parsed, {
+    event: "nyx.chat.timing",
+    status: 200,
+    hasAttachments: true,
+    glmMs: 1200,
+    visionMs: 310,
+    workerMs: 41,
+    totalMs: 1551
+  });
+  assert.ok(!lines[0].includes("secret user prompt"));
+  assert.ok(!lines[0].includes(fakeJwt));
+
+  // Invalid records are dropped rather than logged.
+  for (const invalid of [
+    null,
+    undefined,
+    "nope",
+    [],
+    { status: 99, glmMs: 10, totalMs: 10 },
+    { status: 200, glmMs: -1, totalMs: 10 },
+    { status: 200, glmMs: 10, totalMs: NaN },
+    { status: 200, glmMs: 10, totalMs: 999999 }
+  ]) {
+    logChatTiming(invalid, { logger });
+  }
+  assert.equal(lines.length, 1, "invalid timing inputs are refused");
+
+  // Logger failure never throws.
+  assert.doesNotThrow(() => logChatTiming(
+    { status: 200, glmMs: 10, totalMs: 12 },
+    { logger: { info() { throw new Error("logger broken"); } } }
+  ));
 });

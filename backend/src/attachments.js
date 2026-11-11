@@ -351,7 +351,11 @@ export async function analyzeImage(ai, attachment, userText, { timeoutMs = VISIO
         image: attachment.data,
         question,
         reasoning: false,
-        max_tokens: VISION_MAX_TOKENS
+        max_tokens: VISION_MAX_TOKENS,
+        // Explicitly disable streaming: Moondream 3.1 launched with `stream` defaulting to true,
+        // and `env.AI.run()` returns a raw `ReadableStream` (not a parsed `{ answer }` object)
+        // whenever the upstream response is `text/event-stream` instead of `application/json`.
+        stream: false
       }),
       timeout
     ]);
@@ -360,6 +364,16 @@ export async function analyzeImage(ai, attachment, userText, { timeoutMs = VISIO
     // empty model reply (those surface as a blank string and are a different cause).
     if (result === null || typeof result !== "object" || Array.isArray(result)) {
       throw new VisionError("The vision model returned an unexpected response.", "AI_BAD_RESPONSE");
+    }
+    if (typeof result.getReader === "function") {
+      if (typeof result.cancel === "function") {
+        try {
+          Promise.resolve(result.cancel()).catch(() => {});
+        } catch {
+          // Stream cleanup must never mask AI_BAD_RESPONSE.
+        }
+      }
+      throw new VisionError("The vision model returned an unexpected streaming response.", "AI_BAD_RESPONSE");
     }
     if (!("answer" in result)) {
       throw new VisionError("The vision model returned an unexpected response.", "AI_BAD_RESPONSE");

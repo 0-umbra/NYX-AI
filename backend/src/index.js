@@ -197,8 +197,53 @@ async function readLimitedBody(request, maxBytes) {
   return { text: new TextDecoder().decode(bytes), bytes: total };
 }
 
+function sanitizeDurationMs(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 300000) {
+    return null;
+  }
+  return Math.round(value);
+}
+
+/**
+ * Emits one structured, sanitized timing line for a /chat request that reaches GLM inference.
+ *
+ * Separates main GLM inference time (`glmMs`) and optional vision inference time (`visionMs`)
+ * from total Worker request time (`totalMs`), with `workerMs` (`totalMs - glmMs - visionMs`)
+ * isolating non-inference Worker execution (auth, JWKS, rate limit, body parse, response build).
+ * Built strictly from validated numbers and booleans: never logs prompts, messages, replies,
+ * image data, base64, filenames, user IDs, tokens or provider error text.
+ */
+export function logChatTiming(timing, { logger = console } = {}) {
+  if (!timing || typeof timing !== "object" || Array.isArray(timing)) return;
+  const status = Number.isInteger(timing.status) && timing.status >= 100 && timing.status <= 599
+    ? timing.status
+    : null;
+  if (status === null) return;
+  const glmMs = sanitizeDurationMs(timing.glmMs);
+  const visionMs = sanitizeDurationMs(timing.visionMs);
+  const totalMs = sanitizeDurationMs(timing.totalMs);
+  if (glmMs === null || totalMs === null) return;
+  const safeVisionMs = visionMs ?? 0;
+  const workerMs = Math.max(0, totalMs - glmMs - safeVisionMs);
+  const record = {
+    event: "nyx.chat.timing",
+    status,
+    hasAttachments: timing.hasAttachments === true,
+    glmMs,
+    visionMs: safeVisionMs,
+    workerMs,
+    totalMs
+  };
+  try {
+    logger.info(JSON.stringify(record));
+  } catch {
+    // Logging must never fail the request.
+  }
+}
+
 export default {
   async fetch(request, env) {
+    const requestStartedAt = Date.now();
     const url = new URL(request.url);
     const origin = request.headers.get("Origin");
 
@@ -337,12 +382,14 @@ export default {
     // follow-up questions retain the extracted context.
     const analyses = new Array(attachments.length).fill(null);
     const userText = conversation.messages.at(-1)?.content ?? "";
+    let visionMs = 0;
     for (let index = 0; index < attachments.length; index += 1) {
       const attachment = attachments[index];
       if (attachment.kind !== "image") continue;
       const visionStartedAt = Date.now();
       try {
         analyses[index] = await analyzeImage(env.AI, attachment, userText);
+        visionMs += Date.now() - visionStartedAt;
       } catch (error) {
         const elapsedMs = Date.now() - visionStartedAt;
         const status = Number.isInteger(error?.status) ? error.status : null;
@@ -365,6 +412,7 @@ export default {
     }
     const imageAttachments = attachments.filter((attachment) => attachment.kind === "image");
 
+    let glmStartedAt = null;
     try {
       // The FREE model keeps its existing id and request shape; the conversation history is
       // forwarded as messages so the model can follow up on earlier turns. Attachment
@@ -384,6 +432,7 @@ export default {
 
       // The FREE model keeps its existing id and request shape; the conversation history is
       // forwarded as messages so the model can follow up on earlier turns.
+      glmStartedAt = Date.now();
       const result = await env.AI.run(FREE_MODEL, {
         messages: [
           { role: "system", content: systemPrompt },
@@ -392,10 +441,18 @@ export default {
         max_tokens: 700,
         chat_template_kwargs: { enable_thinking: false }
       });
+      const glmMs = Date.now() - glmStartedAt;
 
       // GLM uses the chat-completions shape; retain support for older models.
       const reply = result?.choices?.[0]?.message?.content ?? result?.response;
       if (typeof reply !== "string" || !reply.trim()) {
+        logChatTiming({
+          status: 502,
+          hasAttachments: attachments.length > 0,
+          glmMs,
+          visionMs,
+          totalMs: Date.now() - requestStartedAt
+        });
         return json({ error: "The AI returned an empty response." }, 502, origin);
       }
 
@@ -407,14 +464,40 @@ export default {
             : null)
           .filter(Boolean);
       }
+      logChatTiming({
+        status: 200,
+        hasAttachments: attachments.length > 0,
+        glmMs,
+        visionMs,
+        totalMs: Date.now() - requestStartedAt
+      });
       return json(payload, 200, origin);
     } catch (error) {
+      const glmMs = glmStartedAt !== null ? Date.now() - glmStartedAt : null;
       // Provider errors may contain request data; do not log their contents.
       if (isQuotaError(error)) {
+        if (glmMs !== null) {
+          logChatTiming({
+            status: 429,
+            hasAttachments: attachments.length > 0,
+            glmMs,
+            visionMs,
+            totalMs: Date.now() - requestStartedAt
+          });
+        }
         return json({
           error: "The free daily AI quota is exhausted. It resets at 00:00 UTC.",
           quotaExhausted: true
         }, 429, origin);
+      }
+      if (glmMs !== null) {
+        logChatTiming({
+          status: 503,
+          hasAttachments: attachments.length > 0,
+          glmMs,
+          visionMs,
+          totalMs: Date.now() - requestStartedAt
+        });
       }
       console.error("Workers AI request failed.");
 

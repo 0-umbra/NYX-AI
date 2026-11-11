@@ -156,6 +156,7 @@ test("a valid image attachment is analysed by the vision model and reaches GLM",
   assert.equal(visionCall.model, VISION_MODEL);
   assert.equal(visionCall.inputs.task, "query");
   assert.equal(visionCall.inputs.reasoning, false);
+  assert.equal(visionCall.inputs.stream, false);
   assert.match(visionCall.inputs.image, /^data:image\/png;base64,/);
   assert.match(visionCall.inputs.question, /Summarise this for me/);
 
