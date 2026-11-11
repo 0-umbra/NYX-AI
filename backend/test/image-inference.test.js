@@ -143,6 +143,7 @@ test("successful inference: the documented answer reaches the client and the cha
   assert.equal(visionCall.model, VISION_MODEL);
   assert.equal(visionCall.inputs.task, "query", "the documented query task");
   assert.equal(visionCall.inputs.reasoning, false, "no reasoning trace");
+  assert.equal(visionCall.inputs.stream, false, "streaming explicitly disabled");
   assert.equal(typeof visionCall.inputs.question, "string");
   assert.match(visionCall.inputs.image, /^data:image\/jpeg;base64,/);
   assert.match(glmCall.inputs.messages.at(-1).content, /A whiteboard with three bullet points\./);
@@ -164,7 +165,9 @@ test("multiple images are analysed in wire order, one call each", async () => {
     imageAttachment({ name: "two.jpg", data: dataUri("image/png", pngBytes), mime: "image/png" })
   ])), env);
   assert.equal(response.status, 200);
-  assert.equal(calls.filter((call) => call.model === VISION_MODEL).length, 2);
+  const visionCalls = calls.filter((call) => call.model === VISION_MODEL);
+  assert.equal(visionCalls.length, 2);
+  for (const call of visionCalls) assert.equal(call.inputs.stream, false);
   const data = await response.json();
   assert.deepEqual(data.attachmentResults.map((result) => result.name), ["one.jpg", "two.jpg"]);
   assert.deepEqual(data.attachmentResults.map((result) => result.analysis), answers);
@@ -177,7 +180,10 @@ test("OCR pages reuse the same vision call and are capped at three", async () =>
   assert.equal(response.status, 200);
   const visionCalls = calls.filter((call) => call.model === VISION_MODEL);
   assert.equal(visionCalls.length, 3);
-  for (const call of visionCalls) assert.match(call.inputs.question, /Transcribe all text/);
+  for (const call of visionCalls) {
+    assert.match(call.inputs.question, /Transcribe all text/);
+    assert.equal(call.inputs.stream, false);
+  }
 
   const tooMany = await worker.fetch(post(chatBody([ocrPage(1), ocrPage(2), ocrPage(3), ocrPage(4)])), makeEnv().env);
   assert.equal(tooMany.status, 400);
@@ -706,4 +712,162 @@ test("diagnostics: the record shape is exactly the documented fields", () => {
   const record = JSON.parse(lines[0]);
   assert.deepEqual(Object.keys(record).sort(),
     ["category", "elapsedMs", "event", "providerCode", "stage", "status"]);
+});
+
+// --- streaming configuration and ReadableStream validation (Moondream 3.1) ---
+
+test("streaming config: a provider that defaults to stream=true succeeds because stream=false is explicit", async () => {
+  // Simulates Moondream 3.1's default-streaming behaviour on Workers AI: when `stream` is omitted
+  // (or true), `env.AI.run()` receives `text/event-stream` and returns a `ReadableStream` without
+  // an `answer` property; only explicit `stream === false` returns the JSON `{ answer }` object.
+  const defaultStreamingProvider = (inputs) => {
+    const stream = inputs.stream ?? true;
+    if (stream) {
+      return new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: {"token":"${SENSITIVE}"}\n\n`));
+          controller.close();
+        }
+      });
+    }
+    return {
+      finish_reason: "stop",
+      metrics: {
+        input_tokens: 128,
+        output_tokens: 9,
+        prefill_time_ms: 42,
+        decode_time_ms: 185,
+        ttft_ms: 46
+      },
+      answer: "Receipt total: $42.50",
+      caption: null,
+      points: null,
+      objects: null,
+      reasoning: null
+    };
+  };
+
+  const { env, calls } = makeEnv({ vision: defaultStreamingProvider });
+  const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.attachmentResults, [{ name: "photo.jpg", analysis: "Receipt total: $42.50" }]);
+  assert.ok(!JSON.stringify(data).includes("metrics"), "raw provider metrics are not forwarded");
+  const visionCall = calls.find((call) => call.model === VISION_MODEL);
+  assert.equal(visionCall.inputs.stream, false);
+});
+
+test("response validation: an unexpected ReadableStream is cancelled, classified as AI_BAD_RESPONSE and never leaked", async () => {
+  let cancelled = false;
+  const capture = captureConsole();
+  try {
+    const { env, calls } = makeEnv({
+      vision: () => new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: {"answer":"${SENSITIVE}"}\n\n`));
+        },
+        cancel() {
+          cancelled = true;
+        }
+      })
+    });
+    const response = await worker.fetch(post(chatBody([imageAttachment({ name: "private-id.jpg" })])), env);
+    assert.equal(response.status, 502);
+    const body = await response.text();
+    assert.match(body, /couldn’t read that image/i);
+    assert.ok(!body.includes(SENSITIVE), "stream bytes must never reach the client");
+    assert.ok(!body.includes("private-id.jpg"), "filename must never appear in error body");
+    assert.equal(cancelled, true, "unconsumed provider stream is cancelled cleanly");
+    assert.equal(calls.filter((call) => call.model === GLM_MODEL).length, 0, "GLM is never called");
+  } finally {
+    capture.restore();
+  }
+
+  const records = capture.records().filter((entry) => entry.event === "nyx.vision.failed");
+  assert.equal(records.length, 1);
+  assert.equal(records[0].stage, "vision.image");
+  assert.equal(records[0].category, "AI_BAD_RESPONSE");
+  assert.ok(!capture.lines.join("\n").includes(SENSITIVE), "stream bytes must never be logged");
+});
+
+test("response validation: stream cancel errors never mask AI_BAD_RESPONSE", async () => {
+  const syncThrowStream = {
+    getReader() { return {}; },
+    cancel() { throw new Error(`cancel failed ${SENSITIVE}`); }
+  };
+  await assert.rejects(
+    () => analyzeImage({ run: async () => syncThrowStream }, { data: dataUri("image/jpeg", jpegBytes), ocr: false }, "describe"),
+    (error) => error.code === "AI_BAD_RESPONSE" && !error.message.includes(SENSITIVE)
+  );
+
+  const asyncRejectStream = {
+    getReader() { return {}; },
+    cancel() { return Promise.reject(new Error(`async cancel failed ${SENSITIVE}`)); }
+  };
+  await assert.rejects(
+    () => analyzeImage({ run: async () => asyncRejectStream }, { data: dataUri("image/jpeg", jpegBytes), ocr: false }, "describe"),
+    (error) => error.code === "AI_BAD_RESPONSE" && !error.message.includes(SENSITIVE)
+  );
+});
+
+test("response validation: documented schema output with null answer is rejected as AI_BAD_RESPONSE", async () => {
+  const { env, calls } = makeEnv({
+    vision: () => ({
+      finish_reason: "stop",
+      metrics: { input_tokens: 10, output_tokens: 5, prefill_time_ms: 20, decode_time_ms: 40, ttft_ms: 22 },
+      answer: null,
+      caption: `${SENSITIVE} caption text`
+    })
+  });
+  const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
+  assert.equal(response.status, 502);
+  const body = await response.text();
+  assert.ok(!body.includes(SENSITIVE));
+  assert.equal(calls.filter((call) => call.model === GLM_MODEL).length, 0);
+});
+
+test("timing: attachment requests separate visionMs and glmMs without logging sensitive content", async () => {
+  const lines = [];
+  const origInfo = console.info;
+  const origError = console.error;
+  console.info = (...args) => { lines.push(args.map(String).join(" ")); };
+  console.error = (...args) => { lines.push(args.map(String).join(" ")); };
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const marker = "SECRET-IMAGE-AND-PROMPT-MARKER";
+  try {
+    const { env } = makeEnv({
+      vision: async () => {
+        await sleep(30);
+        return { answer: `${marker} extracted description` };
+      },
+      chat: async () => {
+        await sleep(35);
+        return { choices: [{ message: { role: "assistant", content: `${marker} final reply` } }] };
+      }
+    });
+    const response = await worker.fetch(post(chatBody(
+      [imageAttachment({ name: `${marker}.jpg` })],
+      { messages: [{ role: "user", content: `Inspect ${marker}` }] }
+    )), env);
+    assert.equal(response.status, 200);
+  } finally {
+    console.info = origInfo;
+    console.error = origError;
+  }
+
+  const joined = lines.join("\n");
+  const base64Head = jpegBytes.toString("base64").slice(0, 32);
+  for (const forbidden of [marker, base64Head, "data:image/jpeg;base64"]) {
+    assert.ok(!joined.includes(forbidden), `timing log must never contain ${JSON.stringify(forbidden)}`);
+  }
+
+  const timing = lines.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+    .find((entry) => entry && entry.event === "nyx.chat.timing");
+  assert.ok(timing, "nyx.chat.timing record emitted");
+  assert.equal(timing.status, 200);
+  assert.equal(timing.hasAttachments, true);
+  assert.ok(timing.visionMs >= 20, `expected visionMs >= 20, got ${timing.visionMs}`);
+  assert.ok(timing.glmMs >= 25, `expected glmMs >= 25, got ${timing.glmMs}`);
+  assert.ok(timing.totalMs >= timing.visionMs + timing.glmMs);
+  assert.equal(timing.workerMs, timing.totalMs - timing.glmMs - timing.visionMs);
 });
