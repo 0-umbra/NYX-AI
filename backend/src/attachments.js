@@ -23,6 +23,7 @@ export const MAX_ATTACHMENT_NAME = 160;
 export const MAX_ANALYSIS_CHARS = 1600;   // per-image analysis kept for the client
 export const VISION_MAX_TOKENS = 640;
 export const VISION_TIMEOUT_MS = 20000;
+export const MAX_VISION_RESPONSE_BYTES = 64 * 1024;
 // Matches src/js/config.js ATTACHMENT_REQUEST_LIMIT. The Worker rejects anything larger.
 export const ATTACHMENT_BODY_LIMIT = 8 * 1024 * 1024;
 export const TEXT_ONLY_BODY_LIMIT = 64 * 1024;
@@ -337,26 +338,96 @@ export function visionFailureResponse(code) {
   }
 }
 
+function cancelVisionStream(stream) {
+  if (typeof stream?.cancel !== "function") return;
+  try {
+    Promise.resolve(stream.cancel()).catch(() => {});
+  } catch {
+    // Cleanup must never replace the original failure or expose provider text.
+  }
+}
+
+/**
+ * The AI binding parses JSON only for the literal Content-Type "application/json". A valid
+ * non-streaming JSON body with a charset parameter is returned as a ReadableStream instead.
+ * Read that body here, with a hard byte cap; SSE, HTML and malformed JSON still fail validation.
+ */
+async function readVisionJson(stream, onReader) {
+  let reader;
+  try {
+    reader = stream.getReader();
+  } catch {
+    throw new VisionError("The vision model returned an unreadable response.", "AI_BAD_RESPONSE");
+  }
+  onReader(reader);
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!ArrayBuffer.isView(value)) {
+        throw new VisionError("The vision model returned an unreadable response.", "AI_BAD_RESPONSE");
+      }
+      total += value.byteLength;
+      if (total > MAX_VISION_RESPONSE_BYTES) {
+        throw new VisionError("The vision model returned an oversized response.", "AI_BAD_RESPONSE");
+      }
+      chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      // SyntaxError messages can contain response fragments; never keep or log them.
+      throw new VisionError("The vision model returned invalid JSON.", "AI_BAD_RESPONSE");
+    }
+  } finally {
+    cancelVisionStream(reader);
+    reader.releaseLock();
+  }
+}
+
 /** Runs a single query against the vision model with a bounded wait. Never retries. */
 export async function analyzeImage(ai, attachment, userText, { timeoutMs = VISION_TIMEOUT_MS } = {}) {
   const question = buildVisionQuestion(attachment, userText);
   let timer;
+  let pendingReader = null;
+  let timedOut = false;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new VisionError("The vision model timed out.", "AI_TIMEOUT")), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      cancelVisionStream(pendingReader);
+      reject(new VisionError("The vision model timed out.", "AI_TIMEOUT"));
+    }, timeoutMs);
   });
   try {
     const result = await Promise.race([
-      ai.run(VISION_MODEL, {
-        task: "query",
-        image: attachment.data,
-        question,
-        reasoning: false,
-        max_tokens: VISION_MAX_TOKENS,
-        // Explicitly disable streaming: Moondream 3.1 launched with `stream` defaulting to true,
-        // and `env.AI.run()` returns a raw `ReadableStream` (not a parsed `{ answer }` object)
-        // whenever the upstream response is `text/event-stream` instead of `application/json`.
-        stream: false
-      }),
+      (async () => {
+        const value = await ai.run(VISION_MODEL, {
+          task: "query",
+          image: attachment.data,
+          question,
+          reasoning: false,
+          max_tokens: VISION_MAX_TOKENS,
+          // Keep streaming disabled. This does not guarantee a parsed object: the binding's
+          // Content-Type check is literal, so a JSON charset parameter still yields a body stream.
+          stream: false
+        });
+        if (timedOut) {
+          if (typeof value?.getReader === "function") cancelVisionStream(value);
+          throw new VisionError("The vision model timed out.", "AI_TIMEOUT");
+        }
+        if (typeof value?.getReader === "function") {
+          return readVisionJson(value, (reader) => { pendingReader = reader; });
+        }
+        return value;
+      })(),
       timeout
     ]);
     // Documented output: `answer` for the query task. A 200 response with no answer, or with a
@@ -364,16 +435,6 @@ export async function analyzeImage(ai, attachment, userText, { timeoutMs = VISIO
     // empty model reply (those surface as a blank string and are a different cause).
     if (result === null || typeof result !== "object" || Array.isArray(result)) {
       throw new VisionError("The vision model returned an unexpected response.", "AI_BAD_RESPONSE");
-    }
-    if (typeof result.getReader === "function") {
-      if (typeof result.cancel === "function") {
-        try {
-          Promise.resolve(result.cancel()).catch(() => {});
-        } catch {
-          // Stream cleanup must never mask AI_BAD_RESPONSE.
-        }
-      }
-      throw new VisionError("The vision model returned an unexpected streaming response.", "AI_BAD_RESPONSE");
     }
     if (!("answer" in result)) {
       throw new VisionError("The vision model returned an unexpected response.", "AI_BAD_RESPONSE");
