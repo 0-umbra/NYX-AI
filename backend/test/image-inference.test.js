@@ -28,6 +28,7 @@ import {
   decodeDataUriImage,
   logVisionFailure,
   MAX_IMAGE_BYTES,
+  MAX_VISION_RESPONSE_BYTES,
   VISION_TIMEOUT_MS,
   validateAttachments
 } from "../src/attachments.js";
@@ -716,38 +717,32 @@ test("diagnostics: the record shape is exactly the documented fields", () => {
 
 // --- streaming configuration and ReadableStream validation (Moondream 3.1) ---
 
-test("streaming config: a provider that defaults to stream=true succeeds because stream=false is explicit", async () => {
-  // Simulates Moondream 3.1's default-streaming behaviour on Workers AI: when `stream` is omitted
-  // (or true), `env.AI.run()` receives `text/event-stream` and returns a `ReadableStream` without
-  // an `answer` property; only explicit `stream === false` returns the JSON `{ answer }` object.
-  const defaultStreamingProvider = (inputs) => {
-    const stream = inputs.stream ?? true;
-    if (stream) {
-      return new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(`data: {"token":"${SENSITIVE}"}\n\n`));
-          controller.close();
-        }
-      });
+test("streaming config: a non-streaming JSON body returned by the AI binding is parsed", async () => {
+  // PR #14 assumed stream:false always makes env.AI.run() return a parsed object. The binding
+  // actually parses only an exact `application/json` Content-Type; a JSON body with a charset
+  // parameter is returned as a ReadableStream even though streaming is disabled.
+  const nonStreamingProvider = () => new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(JSON.stringify({
+        finish_reason: "stop",
+        metrics: {
+          input_tokens: 128,
+          output_tokens: 9,
+          prefill_time_ms: 42,
+          decode_time_ms: 185,
+          ttft_ms: 46
+        },
+        answer: "Receipt total: $42.50",
+        caption: null,
+        points: null,
+        objects: null,
+        reasoning: null
+      })));
+      controller.close();
     }
-    return {
-      finish_reason: "stop",
-      metrics: {
-        input_tokens: 128,
-        output_tokens: 9,
-        prefill_time_ms: 42,
-        decode_time_ms: 185,
-        ttft_ms: 46
-      },
-      answer: "Receipt total: $42.50",
-      caption: null,
-      points: null,
-      objects: null,
-      reasoning: null
-    };
-  };
+  });
 
-  const { env, calls } = makeEnv({ vision: defaultStreamingProvider });
+  const { env, calls } = makeEnv({ vision: nonStreamingProvider });
   const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
   assert.equal(response.status, 200);
   const data = await response.json();
@@ -757,19 +752,20 @@ test("streaming config: a provider that defaults to stream=true succeeds because
   assert.equal(visionCall.inputs.stream, false);
 });
 
-test("response validation: an unexpected ReadableStream is cancelled, classified as AI_BAD_RESPONSE and never leaked", async () => {
-  let cancelled = false;
+test("response validation: a non-JSON ReadableStream is AI_BAD_RESPONSE, releases its reader and never leaks", async () => {
+  let stream;
   const capture = captureConsole();
   try {
     const { env, calls } = makeEnv({
-      vision: () => new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(`data: {"answer":"${SENSITIVE}"}\n\n`));
-        },
-        cancel() {
-          cancelled = true;
-        }
-      })
+      vision: () => {
+        stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`data: {"answer":"${SENSITIVE}"}\n\n`));
+            controller.close();
+          }
+        });
+        return stream;
+      }
     });
     const response = await worker.fetch(post(chatBody([imageAttachment({ name: "private-id.jpg" })])), env);
     assert.equal(response.status, 502);
@@ -777,7 +773,7 @@ test("response validation: an unexpected ReadableStream is cancelled, classified
     assert.match(body, /couldn’t read that image/i);
     assert.ok(!body.includes(SENSITIVE), "stream bytes must never reach the client");
     assert.ok(!body.includes("private-id.jpg"), "filename must never appear in error body");
-    assert.equal(cancelled, true, "unconsumed provider stream is cancelled cleanly");
+    assert.equal(stream.locked, false, "the body reader is released after validation fails");
     assert.equal(calls.filter((call) => call.model === GLM_MODEL).length, 0, "GLM is never called");
   } finally {
     capture.restore();
@@ -791,19 +787,21 @@ test("response validation: an unexpected ReadableStream is cancelled, classified
 });
 
 test("response validation: stream cancel errors never mask AI_BAD_RESPONSE", async () => {
-  const syncThrowStream = {
-    getReader() { return {}; },
+  // An oversized body is rejected while the stream is still open, so cleanup must cancel it.
+  const oversized = () => new TextEncoder().encode(`${SENSITIVE}${"x".repeat(MAX_VISION_RESPONSE_BYTES)}`);
+  const syncThrowStream = new ReadableStream({
+    start(controller) { controller.enqueue(oversized()); },
     cancel() { throw new Error(`cancel failed ${SENSITIVE}`); }
-  };
+  });
   await assert.rejects(
     () => analyzeImage({ run: async () => syncThrowStream }, { data: dataUri("image/jpeg", jpegBytes), ocr: false }, "describe"),
     (error) => error.code === "AI_BAD_RESPONSE" && !error.message.includes(SENSITIVE)
   );
 
-  const asyncRejectStream = {
-    getReader() { return {}; },
+  const asyncRejectStream = new ReadableStream({
+    start(controller) { controller.enqueue(oversized()); },
     cancel() { return Promise.reject(new Error(`async cancel failed ${SENSITIVE}`)); }
-  };
+  });
   await assert.rejects(
     () => analyzeImage({ run: async () => asyncRejectStream }, { data: dataUri("image/jpeg", jpegBytes), ocr: false }, "describe"),
     (error) => error.code === "AI_BAD_RESPONSE" && !error.message.includes(SENSITIVE)
@@ -824,6 +822,108 @@ test("response validation: documented schema output with null answer is rejected
   const body = await response.text();
   assert.ok(!body.includes(SENSITIVE));
   assert.equal(calls.filter((call) => call.model === GLM_MODEL).length, 0);
+});
+
+test("response body: chunked UTF-8 JSON keeps the documented answer and never exposes metadata", async () => {
+  const answer = "Le total du reçu est 42,50 € — café inclus.";
+  const encoded = new TextEncoder().encode(JSON.stringify({
+    answer, finish_reason: "stop", metrics: { input_tokens: 12, output_tokens: 20 }, reasoning: null
+  }));
+  const split = Math.floor(encoded.length / 2);
+  const { env, calls } = makeEnv({ vision: () => new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoded.slice(0, split));
+      controller.enqueue(encoded.slice(split));
+      controller.close();
+    }
+  }) });
+  const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.attachmentResults, [{ name: "photo.jpg", analysis: answer }]);
+  assert.ok(!JSON.stringify(data).includes("metrics"));
+  assert.equal(calls.filter((call) => call.model === VISION_MODEL).length, 1);
+  assert.equal(calls[0].inputs.stream, false);
+});
+
+test("response body: malformed JSON is AI_BAD_RESPONSE, sanitized, and never reaches GLM", async () => {
+  const capture = captureConsole();
+  let response;
+  const { env, calls } = makeEnv({ vision: () => new Response(`{"answer":"${SENSITIVE}"`).body });
+  try {
+    response = await worker.fetch(post(chatBody([imageAttachment({ name: "private-id.jpg" })])), env);
+    assert.equal(response.status, 502);
+    const body = await response.text();
+    assert.match(body, /couldn’t read that image/i);
+    assert.ok(!body.includes(SENSITIVE));
+    assert.ok(!body.includes("private-id.jpg"));
+    assert.equal(calls.filter((call) => call.model === GLM_MODEL).length, 0);
+  } finally {
+    capture.restore();
+  }
+  const record = capture.records().find((entry) => entry.event === "nyx.vision.failed");
+  assert.equal(record.category, "AI_BAD_RESPONSE");
+  assert.ok(!capture.lines.join("\n").includes(SENSITIVE));
+});
+
+test("response body: an oversized JSON stream is cancelled without logging its contents", async () => {
+  let cancelled = false;
+  const capture = captureConsole();
+  const { env, calls } = makeEnv({ vision: () => new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode(SENSITIVE + "x".repeat(MAX_VISION_RESPONSE_BYTES))); },
+    cancel() { cancelled = true; }
+  }) });
+  try {
+    const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
+    assert.equal(response.status, 502);
+    assert.ok(!(await response.text()).includes(SENSITIVE));
+    assert.equal(cancelled, true);
+    assert.equal(calls.filter((call) => call.model === GLM_MODEL).length, 0);
+  } finally {
+    capture.restore();
+  }
+  assert.equal(capture.records().find((entry) => entry.event === "nyx.vision.failed").category, "AI_BAD_RESPONSE");
+  assert.ok(!capture.lines.join("\n").includes(SENSITIVE));
+});
+
+test("response body: a blank answer inside JSON remains AI_EMPTY", async () => {
+  const capture = captureConsole();
+  const { env } = makeEnv({ vision: () => new Response(JSON.stringify({ answer: "  \n " })).body });
+  try {
+    const response = await worker.fetch(post(chatBody([imageAttachment()])), env);
+    assert.equal(response.status, 502);
+  } finally {
+    capture.restore();
+  }
+  assert.equal(capture.records().find((entry) => entry.event === "nyx.vision.failed").category, "AI_EMPTY");
+});
+
+test("response body: the existing timeout includes body consumption and cancels a stalled reader", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{"answer":"partial"')); },
+    cancel() { cancelled = true; }
+  });
+  await assert.rejects(
+    () => analyzeImage({ run: async () => stream }, { data: dataUri("image/jpeg", jpegBytes) }, "describe", { timeoutMs: 30 }),
+    (error) => error.code === "AI_TIMEOUT"
+  );
+  assert.equal(cancelled, true);
+});
+
+test("response body: a stream arriving after the timeout is cancelled instead of left unread", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{"answer":"late"}')); controller.close(); },
+    cancel() { cancelled = true; }
+  });
+  await assert.rejects(
+    () => analyzeImage({ run: () => new Promise((resolve) => setTimeout(() => resolve(stream), 60)) },
+      { data: dataUri("image/jpeg", jpegBytes) }, "describe", { timeoutMs: 20 }),
+    (error) => error.code === "AI_TIMEOUT"
+  );
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(cancelled, true);
 });
 
 test("timing: attachment requests separate visionMs and glmMs without logging sensitive content", async () => {
